@@ -116,6 +116,23 @@ class TrialQueue:
             if result.exception_info is None:
                 return result
 
+            # A trial that produced a verifier reward already carries the
+            # authoritative signal, even though the agent process exited with an
+            # exception. Verification runs regardless of a non-zero agent exit
+            # (see Trial.run: NonZeroAgentExitCodeError is caught, then the
+            # verifier still grades the final state), so an agent that exits
+            # non-zero after reaching a gradeable state still records a real
+            # reward. Retrying such a trial re-runs a full agent episode only to
+            # recompute a reward we already have. Only signal-less trials (a crash
+            # before any gradeable state, so no reward was recorded) are retried.
+            if result.verifier_result is not None and result.verifier_result.rewards:
+                self._logger.debug(
+                    "Not retrying trial: it produced a verifier reward despite "
+                    f"a {result.exception_info.exception_type} agent exit — the "
+                    "reward is the authoritative signal."
+                )
+                return result
+
             if not self._should_retry_exception(result.exception_info.exception_type):
                 self._logger.debug(
                     "Not retrying trial because the exception is not in "

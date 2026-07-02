@@ -4,6 +4,7 @@ import asyncio
 import atexit
 import ipaddress
 import os
+import random
 import shlex
 import socket
 import tempfile
@@ -1008,18 +1009,31 @@ class DaytonaEnvironment(BaseEnvironment):
         return Resources(**kwargs) if kwargs else None
 
     async def _pin_resolved_hosts(self) -> None:
-        """Pin resolved allowlist domains so restricted sandboxes do not need DNS."""
+        """Pin resolved allowlist domains so restricted sandboxes do not need DNS.
+
+        Pins **every** resolved IP per domain (not just the first), in a
+        per-sandbox randomized order. A domain like
+        ``generativelanguage.googleapis.com`` is served by a rotating pool of
+        frontend IPs; pinning a single one funnels every sandbox's traffic
+        through that one frontend, which under many concurrent sandboxes triggers
+        connection resets ("fetch failed sending request") with no failover. All
+        resolved IPs are already in the CIDR allowlist, so pinning them all lets
+        the agent fail over across frontends, and the shuffle spreads the
+        first-choice IP across concurrent sandboxes so load is not concentrated.
+        """
         domain_resolution = self._network_resolution_debug.get("domain_resolution")
         if not isinstance(domain_resolution, dict):
             return
 
         lines: list[str] = []
         for domain, addrs in sorted(domain_resolution.items()):
-            if not addrs or not isinstance(domain, str):
+            if not isinstance(domain, str):
                 continue
-            addr = next((value for value in addrs if isinstance(value, str)), None)
-            if addr:
-                lines.append(f"{addr} {domain}")
+            valid = [value for value in addrs if isinstance(value, str)]
+            if not valid:
+                continue
+            random.shuffle(valid)
+            lines.extend(f"{addr} {domain}" for addr in valid)
 
         if not lines:
             return

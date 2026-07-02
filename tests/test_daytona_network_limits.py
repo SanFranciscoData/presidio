@@ -136,3 +136,29 @@ def test_daytona_pins_resolved_hosts():
 
     assert "203.0.113.10 api.example.com" in captured["command"]
     assert captured["kwargs"]["shell"] == "bash -c"
+
+
+def test_daytona_pins_all_resolved_ips_for_failover():
+    # A domain backed by a rotating frontend pool (e.g. the Gemini API) must pin
+    # EVERY resolved IP, not just the first, so the agent can fail over across
+    # frontends instead of funneling all traffic through one (which triggers
+    # connection resets under many concurrent sandboxes).
+    env = DaytonaEnvironment.__new__(DaytonaEnvironment)
+    env._compose_mode = False
+    ips = ["216.239.32.223", "216.239.34.223", "216.239.36.223", "216.239.38.223"]
+    env._network_resolution_debug = {
+        "domain_resolution": {"generativelanguage.googleapis.com": list(ips)}
+    }
+    captured = {}
+
+    async def sandbox_exec(command, **kwargs):
+        captured["command"] = command
+        return type("Result", (), {"return_code": 0, "stdout": "", "stderr": ""})()
+
+    env._sandbox_exec = sandbox_exec
+    asyncio.run(DaytonaEnvironment._pin_resolved_hosts(env))
+
+    # Every resolved IP is pinned to the host (order is shuffled per sandbox).
+    for ip in ips:
+        assert f"{ip} generativelanguage.googleapis.com" in captured["command"]
+    assert captured["command"].count("generativelanguage.googleapis.com") == len(ips)
