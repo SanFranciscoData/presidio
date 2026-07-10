@@ -9,6 +9,7 @@ class AgentName(str, Enum):
     CURSOR_CLI = "cursor-cli"
     GEMINI_CLI = "gemini-cli"
     MINI_SWE_AGENT = "mini-swe-agent"
+    REACT_TOOLBELT = "react-toolbelt"
     SWE_AGENT = "swe-agent"
     OPENCODE = "opencode"
     TAIGA = "taiga"
