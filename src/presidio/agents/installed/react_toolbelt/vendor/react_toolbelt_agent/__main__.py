@@ -45,6 +45,7 @@ def _load_run_config(path: str) -> tuple[RunConfig, str, str]:
         tool_call_timeout=int(values.get("tool_call_timeout", 60)),
         llm_response_timeout=int(values.get("llm_response_timeout", 600)),
         max_toolbelt_size=int(values.get("max_toolbelt_size", 80)),
+        blocked_tools=list(values.get("blocked_tools") or []),
         extra_args=raw.get("extra_args") or {},
     )
     return config, raw["trajectory_path"], raw["result_path"]
@@ -57,6 +58,7 @@ def _agent_config_dict(config: RunConfig) -> dict:
         "tool_call_timeout": config.tool_call_timeout,
         "llm_response_timeout": config.llm_response_timeout,
         "max_toolbelt_size": config.max_toolbelt_size,
+        "blocked_tools": config.blocked_tools,
     }
 
 

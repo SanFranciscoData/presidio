@@ -54,6 +54,11 @@ class RunConfig:
     tool_call_timeout: int = 60
     llm_response_timeout: int = 600
     max_toolbelt_size: int = 80
+    # Tool names to drop from the MCP surface before the LLM ever sees them
+    # (e.g. escape-hatch tools like browser_run_code_unsafe / browser_evaluate
+    # that would let an operator-profile agent bypass the UI). Enforced in
+    # _initialize_tools so blocked tools cannot be re-added via toolbelt_add_tool.
+    blocked_tools: list[str] = field(default_factory=list)
     extra_args: dict[str, Any] = field(default_factory=dict)
 
     def initial_messages(self) -> list[AnyMessage]:
@@ -128,15 +133,23 @@ class ReActAgent:
             client.session, format="openai"
         )  # pyright: ignore[reportAssignmentType]
 
+        blocked = set(self.config.blocked_tools or [])
+        dropped: list[str] = []
         for tool in tools:
             name = tool.get("function", {}).get("name")
-            if name:
-                self.all_tools[name] = tool
+            if not name:
+                continue
+            if name in blocked:
+                dropped.append(name)
+                continue
+            self.all_tools[name] = tool
 
         self.meta_tool_handler = MetaToolHandler(
             self.all_tools, self.toolbelt, self.config.max_toolbelt_size
         )
 
+        if dropped:
+            logger.info(f"Blocked {len(dropped)} MCP tool(s): {sorted(dropped)}")
         logger.info(
             f"Loaded {len(self.all_tools)} MCP tools (toolbelt starts empty): "
             f"{sorted(self.all_tools.keys())}"

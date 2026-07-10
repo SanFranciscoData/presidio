@@ -47,6 +47,17 @@ class ReactToolbelt(BaseInstalledAgent):
 
     SUPPORTS_ATIF: bool = True
 
+    # Escape-hatch MCP tools that let an operator-profile agent bypass the UI it
+    # is supposed to drive — arbitrary code execution and raw HTTP to the app's
+    # endpoints. Always blocked; there is no legitimate operator use. browser_
+    # evaluate (arbitrary in-page JS) is blocked too by default but can be
+    # re-enabled per run via the allow_browser_evaluate kwarg.
+    _ALWAYS_BLOCKED_TOOLS: tuple[str, ...] = (
+        "browser_run_code_unsafe",
+        "browser_network_request",
+    )
+    _EVALUATE_TOOL: str = "browser_evaluate"
+
     _DEFAULT_PROVIDER_DOMAINS: dict[str, list[str]] = {
         "anthropic": ["api.anthropic.com"],
         "bedrock": [".amazonaws.com"],
@@ -69,6 +80,8 @@ class ReactToolbelt(BaseInstalledAgent):
         llm_response_timeout: int | None = None,
         tool_call_timeout: int | None = None,
         max_toolbelt_size: int | None = None,
+        blocked_tools: list[str] | None = None,
+        allow_browser_evaluate: bool = False,
         extra_args: dict[str, Any] | None = None,
         *args,
         **kwargs,
@@ -86,6 +99,16 @@ class ReactToolbelt(BaseInstalledAgent):
         ):
             if value is not None:
                 self._agent_config[key] = value
+        # Tool gating. An explicit blocked_tools list is an absolute override;
+        # otherwise block the always-unsafe escape hatches plus browser_evaluate
+        # unless the caller opts back in with allow_browser_evaluate=True.
+        if blocked_tools is not None:
+            effective_blocked = list(blocked_tools)
+        else:
+            effective_blocked = list(self._ALWAYS_BLOCKED_TOOLS)
+            if not allow_browser_evaluate:
+                effective_blocked.append(self._EVALUATE_TOOL)
+        self._agent_config["blocked_tools"] = effective_blocked
 
     @staticmethod
     def name() -> str:
