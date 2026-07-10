@@ -179,6 +179,14 @@ chmod -R a+rX {_INSTALL_ROOT}
                 "LITELLM_LOCAL_MODEL_COST_MAP": "true",
                 "PYTHONPATH": str(_SRC_DIR),
                 "PYTHONUNBUFFERED": "1",
+                # Playwright/MCP browser servers this agent spawns over stdio
+                # (e.g. @playwright/mcp) inherit THIS env. Without the browsers
+                # path, `--browser chromium` can't locate the image's bundled
+                # Chromium and falls back to the (unavailable) chrome-for-testing
+                # channel. The Microsoft Playwright base image installs to
+                # /ms-playwright; propagate it so operator-profile browser tasks
+                # work the same way claude-code's MCP client already does.
+                "PLAYWRIGHT_BROWSERS_PATH": "/ms-playwright",
             }
         )
 
