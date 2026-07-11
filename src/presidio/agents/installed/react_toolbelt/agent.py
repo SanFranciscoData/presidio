@@ -47,14 +47,17 @@ class ReactToolbelt(BaseInstalledAgent):
 
     SUPPORTS_ATIF: bool = True
 
-    # Escape-hatch MCP tools that let an operator-profile agent bypass the UI it
-    # is supposed to drive — arbitrary code execution and raw HTTP to the app's
-    # endpoints. Always blocked; there is no legitimate operator use. browser_
-    # evaluate (arbitrary in-page JS) is blocked too by default but can be
-    # re-enabled per run via the allow_browser_evaluate kwarg.
+    # Tools an operator-profile agent has no business using — they let it bypass
+    # the UI it is supposed to drive. Matches the claude-code operator's
+    # --disallowedTools block. Escape hatches (arbitrary code exec / raw HTTP)
+    # and read-only recon (console + network-request listing, which leak the
+    # backend API shape) are always blocked. browser_evaluate (arbitrary in-page
+    # JS) is blocked by default but re-enablable via allow_browser_evaluate.
     _ALWAYS_BLOCKED_TOOLS: tuple[str, ...] = (
         "browser_run_code_unsafe",
         "browser_network_request",
+        "browser_network_requests",
+        "browser_console_messages",
     )
     _EVALUATE_TOOL: str = "browser_evaluate"
 
