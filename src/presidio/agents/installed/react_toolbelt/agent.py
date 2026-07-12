@@ -38,7 +38,12 @@ _RESULT_FILE = "react-toolbelt.result.json"
 # Container-side deps for the vendored agent. The python-dotenv override
 # mirrors upstream archipelago: litellm 1.83.4+ pins python-dotenv==1.0.1
 # while fastmcp>=3.2 requires >=1.1.0; runtime works fine with 1.1.x.
-_VENV_PACKAGES = '"litellm>=1.83.10,<2" "fastmcp>=3.2.0,<4" "loguru>=0.7.3"'
+# litellm[proxy]: newer litellm patches import litellm.responses.mcp.* ->
+# litellm.proxy.* on the ordinary completion path, which transitively needs the
+# proxy extras (fastapi, orjson, uvicorn, ...). Bare litellm dies with
+# ModuleNotFoundError per-missing-module (fastapi, then orjson, ...) on every LLM
+# call; the [proxy] extra pulls them all in one shot.
+_VENV_PACKAGES = '"litellm[proxy]>=1.83.10,<2" "fastmcp>=3.2.0,<4" "loguru>=0.7.3"'
 _VENV_OVERRIDES = "python-dotenv>=1.1.0"
 
 
