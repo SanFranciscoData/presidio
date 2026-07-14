@@ -41,6 +41,12 @@ from .tools import (
 from .usage import UsageTracker
 
 
+# Abort the run after this many consecutive LLM responses with no content and
+# no tool calls (e.g. finish_reason=content_filter). Persistent refusals don't
+# recover from the re-prompt nudge, so continuing just burns steps and tokens.
+MAX_CONSECUTIVE_EMPTY_RESPONSES = 8
+
+
 @dataclass
 class RunConfig:
     """Everything the agent needs for one run."""
@@ -121,6 +127,13 @@ class ReActAgent:
         # id(message). Message objects survive ReSum history moves intact,
         # so ids stay valid for the final serialization pass.
         self.msg_meta: dict[int, dict[str, Any]] = {}
+
+        # Consecutive LLM responses with no content and no tool calls (e.g.
+        # finish_reason=content_filter refusals). Once a conversation enters a
+        # refusal state the re-prompt nudge rarely breaks it, so the run loop
+        # aborts after MAX_CONSECUTIVE_EMPTY_RESPONSES instead of burning the
+        # remaining step budget on identical refusals.
+        self._consecutive_empty_responses = 0
 
     def _get_tools(self) -> list[dict[str, Any]]:
         """Get tools for LLM: meta-tools + toolbelt + final_answer."""
@@ -203,6 +216,7 @@ class ReActAgent:
             self.messages.append(
                 {"role": "user", "content": "Continue. Use final_answer when done."}
             )
+            self._consecutive_empty_responses += 1
             return
 
         response_message = LitellmOutputMessage.model_validate(choices[0].message)
@@ -228,6 +242,11 @@ class ReActAgent:
             logger.warning(
                 f"No content and no tool calls (finish_reason={finish_reason})"
             )
+
+        if not tool_calls and not content:
+            self._consecutive_empty_responses += 1
+        else:
+            self._consecutive_empty_responses = 0
 
         self.messages.append(response_message)
 
@@ -446,6 +465,17 @@ class ReActAgent:
                         logger.info(f"Starting step {step + 1}")
                         await self.step(client)
                         self._checkpoint()
+                        if (
+                            self._consecutive_empty_responses
+                            >= MAX_CONSECUTIVE_EMPTY_RESPONSES
+                        ):
+                            logger.error(
+                                f"Aborting after "
+                                f"{self._consecutive_empty_responses} consecutive "
+                                f"empty LLM responses (likely a persistent "
+                                f"content-filter refusal loop)"
+                            )
+                            break
 
                     if not self._finalized:
                         logger.error(
