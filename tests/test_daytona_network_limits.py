@@ -9,6 +9,7 @@ from presidio.environments.daytona import (
     resolve_network_allowlist_to_daytona_cidrs,
 )
 from presidio.models.agent.network import NetworkAllowlist
+from presidio.models.task.config import TaskOS
 
 
 def _addr(ip: str):
@@ -115,6 +116,21 @@ def test_daytona_compose_does_not_advertise_agent_preinstall():
 
     assert env.capabilities.network_allowlist is True
     assert env.capabilities.preinstall_agents is False
+
+
+def test_daytona_direct_resets_directories_as_sandbox_user():
+    env = DaytonaEnvironment.__new__(DaytonaEnvironment)
+    env._compose_mode = False
+
+    assert env._reset_dirs_user() is None
+
+
+def test_daytona_compose_resets_directories_as_root():
+    env = DaytonaEnvironment.__new__(DaytonaEnvironment)
+    env._compose_mode = True
+    env.task_env_config = type("TaskEnv", (), {"os": TaskOS.LINUX})()
+
+    assert env._reset_dirs_user() == "root"
 
 
 def test_daytona_pins_resolved_hosts():

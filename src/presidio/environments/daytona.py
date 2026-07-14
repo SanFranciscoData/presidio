@@ -877,6 +877,9 @@ class DaytonaEnvironment(BaseEnvironment):
     def _uses_compose(self) -> bool:
         return self._compose_mode
 
+    def _reset_dirs_user(self) -> str | None:
+        return super()._reset_dirs_user() if self._compose_mode else None
+
     @property
     def capabilities(self) -> EnvironmentCapabilities:
         return EnvironmentCapabilities(
