@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import email.utils
 import ipaddress
 import os
 import random
@@ -9,6 +10,8 @@ import shlex
 import socket
 import tempfile
 from abc import abstractmethod
+from collections.abc import Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Union
 from uuid import uuid4
@@ -45,6 +48,7 @@ try:
         CreateSandboxFromImageParams,
         CreateSandboxFromSnapshotParams,
         DaytonaNotFoundError,
+        DaytonaRateLimitError,
         FileDownloadRequest,
         FileUpload,
         Image,
@@ -68,6 +72,42 @@ if TYPE_CHECKING:
 _SandboxParams = Union["CreateSandboxFromImageParams", "CreateSandboxFromSnapshotParams"]
 
 DAYTONA_MAX_NETWORK_ALLOWLIST_CIDRS = 10
+DAYTONA_OWNER_LABEL = "presidio.owner-token"
+DAYTONA_DEFAULT_AUTO_STOP_INTERVAL_MINS = 60
+DAYTONA_DEFAULT_AUTO_DELETE_INTERVAL_MINS = 0
+DAYTONA_CREATE_MAX_ATTEMPTS = 2
+DAYTONA_RATE_LIMIT_MAX_ATTEMPTS = 5
+DAYTONA_RATE_LIMIT_MAX_DELAY_SEC = 120.0
+
+
+def _mb_to_gib_ceil(mb: int) -> int:
+    """Convert MiB to whole GiB, rounding up so we never underprovision."""
+    return max(1, -(-int(mb) // 1024))
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
+    """Extract a Retry-After delay (in seconds) from a Daytona error, if present."""
+    headers = getattr(exc, "headers", None)
+    if not isinstance(headers, Mapping):
+        return None
+    value: str | None = None
+    for key, raw in headers.items():
+        if str(key).lower() == "retry-after":
+            value = str(raw).strip()
+            break
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        retry_at = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=timezone.utc)
+    return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
 
 
 def _daytona_preflight() -> None:
@@ -311,18 +351,14 @@ class _DaytonaDirect(_DaytonaStrategy):
         params: _SandboxParams
         if snapshot_exists and snapshot_name:
             params = CreateSandboxFromSnapshotParams(
-                auto_delete_interval=env._auto_delete_interval,
-                auto_stop_interval=env._auto_stop_interval,
                 snapshot=snapshot_name,
-                **env._network_params(),
+                **env._base_sandbox_params(),
             )
         elif force_build or not env.task_env_config.docker_image:
             image = env._with_agent_install(Image.from_dockerfile(env._dockerfile_path))
             kwargs = {
                 "image": image,
-                "auto_delete_interval": env._auto_delete_interval,
-                "auto_stop_interval": env._auto_stop_interval,
-                **env._network_params(),
+                **env._base_sandbox_params(),
             }
             if resources is not None:
                 kwargs["resources"] = resources
@@ -333,9 +369,7 @@ class _DaytonaDirect(_DaytonaStrategy):
             image = env._with_agent_install(Image.base(env.task_env_config.docker_image))
             kwargs = {
                 "image": image,
-                "auto_delete_interval": env._auto_delete_interval,
-                "auto_stop_interval": env._auto_stop_interval,
-                **env._network_params(),
+                **env._base_sandbox_params(),
             }
             if resources is not None:
                 kwargs["resources"] = resources
@@ -574,16 +608,12 @@ class _DaytonaDinD(_DaytonaStrategy):
         if dind_snapshot:
             params: _SandboxParams = CreateSandboxFromSnapshotParams(
                 snapshot=dind_snapshot,
-                auto_delete_interval=env._auto_delete_interval,
-                auto_stop_interval=env._auto_stop_interval,
-                **env._network_params(),
+                **env._base_sandbox_params(),
             )
         else:
             kwargs = {
                 "image": Image.base(dind_image),
-                "auto_delete_interval": env._auto_delete_interval,
-                "auto_stop_interval": env._auto_stop_interval,
-                **env._network_params(),
+                **env._base_sandbox_params(),
             }
             if resources is not None:
                 kwargs["resources"] = resources
@@ -836,8 +866,10 @@ class DaytonaEnvironment(BaseEnvironment):
         snapshot_template_name: str | None = None,
         network_block_all: bool | None = None,
         network_allow_list: str | list[str] | None = None,
-        auto_stop_interval_mins: int = 0,
-        auto_delete_interval_mins: int = 0,
+        auto_stop_interval_mins: int | None = None,
+        auto_delete_interval_mins: int | None = None,
+        sandbox_labels: dict[str, str] | None = None,
+        labels: dict[str, str] | None = None,
         **kwargs: Any,
     ):
         if not _HAS_DAYTONA:
@@ -857,8 +889,26 @@ class DaytonaEnvironment(BaseEnvironment):
             **kwargs,
         )
 
-        self._auto_stop_interval = auto_stop_interval_mins
-        self._auto_delete_interval = auto_delete_interval_mins
+        self._auto_stop_interval = (
+            DAYTONA_DEFAULT_AUTO_STOP_INTERVAL_MINS
+            if auto_stop_interval_mins is None
+            else auto_stop_interval_mins
+        )
+        self._auto_delete_interval = (
+            DAYTONA_DEFAULT_AUTO_DELETE_INTERVAL_MINS
+            if auto_delete_interval_mins is None
+            else auto_delete_interval_mins
+        )
+        if self._auto_stop_interval == 0 and self._auto_delete_interval < 0:
+            self.logger.warning(
+                "Daytona auto-stop and auto-delete are both disabled; sandboxes "
+                "leaked by interrupted runs will persist until manually deleted."
+            )
+        self._owner_token = uuid4().hex
+        caller_labels = {**(sandbox_labels or {}), **(labels or {})}
+        self._caller_labels = {
+            str(key): str(value) for key, value in caller_labels.items()
+        }
         self._snapshot_template_name = snapshot_template_name
         self._sandbox: AsyncSandbox | None = None
         self._client_manager: DaytonaClientManager | None = None
@@ -1006,10 +1056,32 @@ class DaytonaEnvironment(BaseEnvironment):
         if (cpus := self._effective_cpus) is not None:
             kwargs["cpu"] = cpus
         if (memory_mb := self._effective_memory_mb) is not None:
-            kwargs["memory"] = memory_mb // 1024
+            kwargs["memory"] = _mb_to_gib_ceil(memory_mb)
         if (storage_mb := self._effective_storage_mb) is not None:
-            kwargs["disk"] = storage_mb // 1024
+            kwargs["disk"] = _mb_to_gib_ceil(storage_mb)
         return Resources(**kwargs) if kwargs else None
+
+    def _ownership_labels(self) -> dict[str, str]:
+        return {DAYTONA_OWNER_LABEL: self._owner_token}
+
+    def _sandbox_labels(self) -> dict[str, str]:
+        ownership = self._ownership_labels()
+        collisions = set(self._caller_labels) & set(ownership)
+        if collisions:
+            self.logger.warning(
+                "Caller-provided Daytona labels collide with Presidio ownership "
+                "label(s) and will be overridden: %s",
+                ", ".join(sorted(collisions)),
+            )
+        return {**self._caller_labels, **ownership}
+
+    def _base_sandbox_params(self) -> dict[str, Any]:
+        return {
+            "auto_delete_interval": self._auto_delete_interval,
+            "auto_stop_interval": self._auto_stop_interval,
+            "labels": self._sandbox_labels(),
+            **self._network_params(),
+        }
 
     async def _pin_resolved_hosts(self) -> None:
         """Pin resolved allowlist domains so restricted sandboxes do not need DNS.
@@ -1064,12 +1136,62 @@ class DaytonaEnvironment(BaseEnvironment):
             return False
         return not self._resolved_network_allow_list
 
-    @retry(
-        stop=stop_after_attempt(2),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
-        reraise=True,
-    )
+    async def _cleanup_orphan_sandboxes(self) -> None:
+        """Best-effort deletion of sandboxes created by this environment instance.
+
+        Filters by this instance's unique ownership label so sandboxes owned by
+        other sessions are never touched.
+        """
+        if not self._client_manager:
+            return
+        try:
+            daytona = await self._client_manager.get_client()
+            result = await daytona.list(labels=self._ownership_labels())
+            for sandbox in result.items:
+                if self._sandbox is not None and sandbox.id == self._sandbox.id:
+                    continue
+                try:
+                    await sandbox.delete()
+                    self.logger.info(f"Deleted orphan Daytona sandbox {sandbox.id}")
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to delete orphan Daytona sandbox {sandbox.id}: {e}"
+                    )
+        except Exception as e:
+            self.logger.debug(f"Orphan sandbox cleanup skipped: {e}")
+
     async def _create_sandbox(self, params: _SandboxParams) -> None:
+        generic_attempts = 0
+        rate_limit_attempts = 0
+        while True:
+            try:
+                await self._create_sandbox_once(params)
+                return
+            except DaytonaRateLimitError as e:
+                rate_limit_attempts += 1
+                if rate_limit_attempts >= DAYTONA_RATE_LIMIT_MAX_ATTEMPTS:
+                    raise
+                delay = _retry_after_seconds(e)
+                if delay is None:
+                    delay = min(2.0 ** (rate_limit_attempts + 1), 30.0)
+                delay = min(delay, DAYTONA_RATE_LIMIT_MAX_DELAY_SEC)
+                self.logger.warning(
+                    "Daytona rate limit hit while creating sandbox; retrying in "
+                    f"{delay:.1f}s (attempt {rate_limit_attempts}/"
+                    f"{DAYTONA_RATE_LIMIT_MAX_ATTEMPTS - 1})"
+                )
+                await self._cleanup_orphan_sandboxes()
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                generic_attempts += 1
+                if generic_attempts >= DAYTONA_CREATE_MAX_ATTEMPTS:
+                    raise
+                await self._cleanup_orphan_sandboxes()
+                await asyncio.sleep(min(2.0**generic_attempts, 10.0))
+
+    async def _create_sandbox_once(self, params: _SandboxParams) -> None:
         if not self._client_manager:
             raise RuntimeError(
                 "Client manager not initialized. This should never happen."
@@ -1086,7 +1208,14 @@ class DaytonaEnvironment(BaseEnvironment):
             self._sandbox = await asyncio.shield(create_task)
         except asyncio.CancelledError:
             try:
-                self._sandbox = await asyncio.wait_for(create_task, timeout=30)
+                sandbox = await asyncio.wait_for(create_task, timeout=30)
+                try:
+                    await sandbox.delete()
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to delete Daytona sandbox {sandbox.id} "
+                        f"after cancellation: {e}"
+                    )
             except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                 create_task.cancel()
             raise
