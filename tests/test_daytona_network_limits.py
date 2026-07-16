@@ -282,7 +282,7 @@ def test_daytona_direct_start_uses_toolbox_directory_provisioning(monkeypatch):
     )()
     env._sandbox_resources = lambda: None
     env._configure_daytona_client = AsyncMock()
-    env._network_params = lambda: {}
+    env._base_sandbox_params = lambda: {}
     env._with_agent_install = lambda image: image
     env._create_sandbox = AsyncMock()
     env._provision_directories = AsyncMock()
