@@ -47,14 +47,9 @@ allowed_hosts = ["api.example.com"]
 
 `allowlist` is what lets a verifier reach an external service under deny-by-default egress. On sandbox backends that support it, `[agent]`/`[verifier]` may override the policy per phase on a running sandbox.
 
-## Daytona environment
+## Environments
 
-`--env daytona` runs each trial in a [Daytona](https://www.daytona.io/) sandbox. Environment kwargs (`--ek key=value`) specific to Daytona:
-
-- `sandbox_labels` (or `labels`): dict of custom labels applied to every sandbox Presidio creates (all create paths: direct and Docker-in-Docker, image- and snapshot-based). Presidio always adds its own `presidio.owner-token` ownership label, which cannot be overridden; it is used to find and delete sandboxes leaked by interrupted create calls.
-- `auto_stop_interval_mins` / `auto_delete_interval_mins`: sandbox lifecycle intervals in minutes, passed through to Daytona. Defaults are safe: auto-stop after 60 idle minutes and auto-delete immediately upon stopping. Passing `auto_stop_interval_mins=0` disables auto-stop; combining it with a negative `auto_delete_interval_mins` (auto-delete disabled) is honored but logs a warning, since leaked sandboxes would then persist until deleted manually.
-
-Task `memory_mb`/`storage_mb` are converted to Daytona's whole-GiB resource units by rounding up, so a sandbox is never provisioned below what the task requests. Daytona HTTP 429 responses are retried natively, honoring the provider's `Retry-After` header when present instead of a generic short backoff.
+Pick a sandbox backend with `--env` and pass backend-specific options with `--ek key=value`. For Daytona, sandboxes auto-stop after 60 idle minutes and are deleted on stop by default (override with `--ek auto_stop_interval_mins=... --ek auto_delete_interval_mins=...`). Custom labels can be attached with `--ek sandbox_labels={"k":"v"}`.
 
 ## Agents
 
