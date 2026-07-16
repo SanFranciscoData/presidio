@@ -10,16 +10,16 @@ import shlex
 import socket
 import tempfile
 from abc import abstractmethod
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Union
 from uuid import uuid4
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from presidio.environments.agent_setup import dockerfile_install_commands
-from presidio.environments.base import BaseEnvironment, ExecResult
+from presidio.environments.base import BaseEnvironment, EnvironmentPath, ExecResult
 from presidio.environments.capabilities import (
     EnvironmentCapabilities,
     EnvironmentResourceCapabilities,
@@ -34,7 +34,7 @@ from presidio.environments.docker import (
 )
 from presidio.environments.docker.docker import _sanitize_docker_image_name
 from presidio.models.environment_type import EnvironmentType
-from presidio.models.task.config import EnvironmentConfig
+from presidio.models.task.config import EnvironmentConfig, TaskOS
 from presidio.models.trial.config import ResourceMode
 from presidio.models.trial.paths import EnvironmentPaths, TrialPaths
 from presidio.utils.env import resolve_env_vars
@@ -69,7 +69,9 @@ except ImportError:
 if TYPE_CHECKING:
     from daytona import CreateSandboxFromImageParams, CreateSandboxFromSnapshotParams
 
-_SandboxParams = Union["CreateSandboxFromImageParams", "CreateSandboxFromSnapshotParams"]
+_SandboxParams = Union[
+    "CreateSandboxFromImageParams", "CreateSandboxFromSnapshotParams"
+]
 
 DAYTONA_MAX_NETWORK_ALLOWLIST_CIDRS = 10
 DAYTONA_OWNER_LABEL = "presidio.owner-token"
@@ -329,7 +331,9 @@ class _DaytonaDirect(_DaytonaStrategy):
         snapshot_name: str | None = None
         snapshot_exists = False
         if env._snapshot_template_name:
-            snapshot_name = env._snapshot_template_name.format(name=env.environment_name)
+            snapshot_name = env._snapshot_template_name.format(
+                name=env.environment_name
+            )
             try:
                 snapshot = await daytona.snapshot.get(snapshot_name)
                 snapshot_exists = snapshot.state == SnapshotState.ACTIVE
@@ -366,7 +370,9 @@ class _DaytonaDirect(_DaytonaStrategy):
                 **kwargs,
             )
         else:
-            image = env._with_agent_install(Image.base(env.task_env_config.docker_image))
+            image = env._with_agent_install(
+                Image.base(env.task_env_config.docker_image)
+            )
             kwargs = {
                 "image": image,
                 **env._base_sandbox_params(),
@@ -378,11 +384,8 @@ class _DaytonaDirect(_DaytonaStrategy):
             )
 
         await env._create_sandbox(params=params)
+        await env._provision_directories()
         await env._pin_resolved_hosts()
-        await env._sandbox_exec(
-            f"mkdir -p {EnvironmentPaths.agent_dir} {EnvironmentPaths.verifier_dir} && "
-            f"chmod 777 {EnvironmentPaths.agent_dir} {EnvironmentPaths.verifier_dir}"
-        )
 
     async def stop(self, delete: bool) -> None:
         env = self._env
@@ -930,6 +933,79 @@ class DaytonaEnvironment(BaseEnvironment):
     def _reset_dirs_user(self) -> str | None:
         return super()._reset_dirs_user() if self._compose_mode else None
 
+    def _reset_dirs_command(
+        self,
+        *,
+        remove_dirs: Sequence[EnvironmentPath],
+        create_dirs: Sequence[EnvironmentPath],
+        chmod_dirs: Sequence[EnvironmentPath] | None = None,
+    ) -> str:
+        if self._compose_mode or self.task_os == TaskOS.WINDOWS:
+            return super()._reset_dirs_command(
+                remove_dirs=remove_dirs,
+                create_dirs=create_dirs,
+                chmod_dirs=chmod_dirs,
+            )
+
+        commands: list[str] = []
+        removed = set(remove_dirs)
+        for path in remove_dirs:
+            quoted = shlex.quote(str(path))
+            if PurePosixPath(path).parent == PurePosixPath("/"):
+                commands.extend(
+                    [
+                        f"test -d {quoted} && test ! -L {quoted}",
+                        f"find {quoted} -mindepth 1 -maxdepth 1 -exec rm -rf -- {{}} +",
+                    ]
+                )
+            else:
+                commands.append(self._empty_dirs_command([path], chmod=False))
+
+        create_only = [path for path in create_dirs if path not in removed]
+        for path in create_only:
+            quoted = shlex.quote(str(path))
+            if PurePosixPath(path).parent == PurePosixPath("/"):
+                commands.append(f"test -d {quoted} && test ! -L {quoted}")
+            else:
+                commands.append(f"mkdir -p {quoted}")
+
+        if chmod_dirs:
+            chmod_args = " ".join(shlex.quote(str(path)) for path in chmod_dirs)
+            commands.append(f"chmod 777 {chmod_args}")
+
+        return " && ".join(commands)
+
+    async def _exec_directory_command(
+        self,
+        command: str,
+        *,
+        user: str | int | None,
+    ) -> ExecResult:
+        if self._compose_mode or user is not None:
+            return await super()._exec_directory_command(command, user=user)
+        return await self._strategy.exec(
+            command,
+            cwd=self.task_env_config.workdir,
+            env=self._merge_env(None),
+            user=None,
+        )
+
+    async def _provision_directories(self) -> None:
+        if not self._sandbox:
+            raise RuntimeError("Sandbox not found. Please build the environment first.")
+
+        paths = (
+            EnvironmentPaths.logs_dir,
+            EnvironmentPaths.agent_dir,
+            EnvironmentPaths.verifier_dir,
+            EnvironmentPaths.artifacts_dir,
+            EnvironmentPaths.tests_dir,
+            EnvironmentPaths.solution_dir,
+        )
+        for path in paths:
+            await self._sandbox.fs.create_folder(str(path), "777")
+            await self._sandbox.fs.set_file_permissions(str(path), mode="777")
+
     @property
     def capabilities(self) -> EnvironmentCapabilities:
         return EnvironmentCapabilities(
@@ -1292,7 +1368,9 @@ class DaytonaEnvironment(BaseEnvironment):
 
         command = f"{shell} {shlex.quote(command)}"
         if env:
-            env_args = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
+            env_args = " ".join(
+                f"{key}={shlex.quote(value)}" for key, value in env.items()
+            )
             command = f"env {env_args} {command}"
         if timeout_sec:
             command = f"timeout {timeout_sec} {command}"

@@ -1,15 +1,21 @@
+import asyncio
 import logging
 import socket
-import asyncio
+from unittest.mock import AsyncMock, call
+
+import pytest
 
 from presidio.environments.daytona import (
     DAYTONA_MAX_NETWORK_ALLOWLIST_CIDRS,
+    DaytonaClientManager,
     DaytonaEnvironment,
+    _DaytonaDirect,
     _DaytonaDinD,
     resolve_network_allowlist_to_daytona_cidrs,
 )
 from presidio.models.agent.network import NetworkAllowlist
 from presidio.models.task.config import TaskOS
+from presidio.models.trial.paths import EnvironmentPaths
 
 
 def _addr(ip: str):
@@ -37,9 +43,7 @@ def test_daytona_collapses_resolved_cidrs_to_daytona_limit(monkeypatch):
 
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
 
-    _resolution, cidrs = resolve_network_allowlist_to_daytona_cidrs(
-        ["api.openai.com"]
-    )
+    _resolution, cidrs = resolve_network_allowlist_to_daytona_cidrs(["api.openai.com"])
 
     assert len(cidrs) <= DAYTONA_MAX_NETWORK_ALLOWLIST_CIDRS
     assert all(cidr.endswith(("/32", "/31", "/30", "/29", "/28")) for cidr in cidrs)
@@ -131,6 +135,176 @@ def test_daytona_compose_resets_directories_as_root():
     env.task_env_config = type("TaskEnv", (), {"os": TaskOS.LINUX})()
 
     assert env._reset_dirs_user() == "root"
+
+
+def _reset_test_env(*, compose_mode: bool, default_user: str | None):
+    env = DaytonaEnvironment.__new__(DaytonaEnvironment)
+    env._compose_mode = compose_mode
+    env._persistent_env = {}
+    env.default_user = default_user
+    env.task_env_config = type(
+        "TaskEnv",
+        (),
+        {"os": TaskOS.LINUX, "workdir": None},
+    )()
+    result = type("Result", (), {"return_code": 0, "stdout": "", "stderr": ""})()
+    env._strategy = type(
+        "Strategy",
+        (),
+        {"exec": AsyncMock(return_value=result)},
+    )()
+    return env
+
+
+def test_daytona_direct_reset_bypasses_default_user():
+    env = _reset_test_env(compose_mode=False, default_user="root")
+
+    asyncio.run(
+        env.reset_dirs(
+            remove_dirs=[EnvironmentPaths.agent_dir],
+            create_dirs=[EnvironmentPaths.agent_dir],
+            chmod_dirs=[EnvironmentPaths.agent_dir],
+        )
+    )
+
+    assert env._strategy.exec.await_args.kwargs["user"] is None
+
+
+def test_daytona_direct_reset_preserves_root_directory_entries():
+    env = _reset_test_env(compose_mode=False, default_user="root")
+
+    asyncio.run(
+        env.reset_dirs(
+            remove_dirs=[EnvironmentPaths.tests_dir],
+            create_dirs=[EnvironmentPaths.tests_dir],
+            chmod_dirs=[EnvironmentPaths.tests_dir],
+        )
+    )
+
+    command = env._strategy.exec.await_args.args[0]
+    assert "find /tests -mindepth 1 -maxdepth 1" in command
+    assert "rm -rf /tests" not in command
+
+
+def test_daytona_exec_without_user_uses_default_user():
+    env = _reset_test_env(compose_mode=False, default_user="root")
+
+    asyncio.run(env.exec("echo ready"))
+
+    assert env._strategy.exec.await_args.kwargs["user"] == "root"
+
+
+def test_daytona_compose_reset_keeps_root_user():
+    env = _reset_test_env(compose_mode=True, default_user="agent")
+
+    asyncio.run(
+        env.reset_dirs(
+            remove_dirs=[EnvironmentPaths.agent_dir],
+            create_dirs=[EnvironmentPaths.agent_dir],
+            chmod_dirs=[EnvironmentPaths.agent_dir],
+        )
+    )
+
+    assert env._strategy.exec.await_args.kwargs["user"] == "root"
+
+
+def test_daytona_direct_provisions_canonical_directories():
+    env = DaytonaEnvironment.__new__(DaytonaEnvironment)
+    create_folder = AsyncMock()
+    set_file_permissions = AsyncMock()
+    env._sandbox = type(
+        "Sandbox",
+        (),
+        {
+            "fs": type(
+                "FileSystem",
+                (),
+                {
+                    "create_folder": create_folder,
+                    "set_file_permissions": set_file_permissions,
+                },
+            )()
+        },
+    )()
+
+    asyncio.run(env._provision_directories())
+
+    assert create_folder.await_args_list == [
+        call(str(EnvironmentPaths.logs_dir), "777"),
+        call(str(EnvironmentPaths.agent_dir), "777"),
+        call(str(EnvironmentPaths.verifier_dir), "777"),
+        call(str(EnvironmentPaths.artifacts_dir), "777"),
+        call(str(EnvironmentPaths.tests_dir), "777"),
+        call(str(EnvironmentPaths.solution_dir), "777"),
+    ]
+    assert set_file_permissions.await_args_list == [
+        call(str(EnvironmentPaths.logs_dir), mode="777"),
+        call(str(EnvironmentPaths.agent_dir), mode="777"),
+        call(str(EnvironmentPaths.verifier_dir), mode="777"),
+        call(str(EnvironmentPaths.artifacts_dir), mode="777"),
+        call(str(EnvironmentPaths.tests_dir), mode="777"),
+        call(str(EnvironmentPaths.solution_dir), mode="777"),
+    ]
+
+
+def test_daytona_direct_directory_provisioning_fails_closed():
+    env = DaytonaEnvironment.__new__(DaytonaEnvironment)
+    create_folder = AsyncMock(side_effect=RuntimeError("permission denied"))
+    env._sandbox = type(
+        "Sandbox",
+        (),
+        {
+            "fs": type(
+                "FileSystem",
+                (),
+                {
+                    "create_folder": create_folder,
+                    "set_file_permissions": AsyncMock(),
+                },
+            )()
+        },
+    )()
+
+    with pytest.raises(RuntimeError, match="permission denied"):
+        asyncio.run(env._provision_directories())
+
+
+def test_daytona_direct_start_uses_toolbox_directory_provisioning(monkeypatch):
+    env = DaytonaEnvironment.__new__(DaytonaEnvironment)
+    env._snapshot_template_name = None
+    env._auto_delete_interval = 0
+    env._auto_stop_interval = 0
+    env.agent_install_spec = None
+    env.task_env_config = type(
+        "TaskEnv",
+        (),
+        {"docker_image": "example/image:tag"},
+    )()
+    env._sandbox_resources = lambda: None
+    env._configure_daytona_client = AsyncMock()
+    env._base_sandbox_params = lambda: {}
+    env._with_agent_install = lambda image: image
+    env._create_sandbox = AsyncMock()
+    env._provision_directories = AsyncMock()
+    env._pin_resolved_hosts = AsyncMock()
+    env._sandbox_exec = AsyncMock()
+    manager = type(
+        "Manager",
+        (),
+        {"get_client": AsyncMock(return_value=object())},
+    )()
+    monkeypatch.setattr(
+        DaytonaClientManager,
+        "get_instance",
+        AsyncMock(return_value=manager),
+    )
+
+    asyncio.run(_DaytonaDirect(env).start(force_build=False))
+
+    env._create_sandbox.assert_awaited_once()
+    env._provision_directories.assert_awaited_once_with()
+    env._pin_resolved_hosts.assert_awaited_once_with()
+    env._sandbox_exec.assert_not_awaited()
 
 
 def test_daytona_pins_resolved_hosts():
