@@ -380,6 +380,14 @@ class BaseEnvironment(ABC):
             return None
         return "root"
 
+    async def _exec_directory_command(
+        self,
+        command: str,
+        *,
+        user: str | int | None,
+    ) -> ExecResult:
+        return await self.exec(command, user=user)
+
     async def reset_dirs(
         self,
         *,
@@ -388,7 +396,7 @@ class BaseEnvironment(ABC):
         chmod_dirs: Sequence[EnvironmentPath] | None = None,
     ) -> ExecResult:
         """Remove and recreate environment directories using the target OS shell."""
-        return await self.exec(
+        return await self._exec_directory_command(
             self._reset_dirs_command(
                 remove_dirs=remove_dirs,
                 create_dirs=create_dirs,
@@ -406,7 +414,7 @@ class BaseEnvironment(ABC):
         """Ensure directories exist and are empty without replacing directory roots."""
         if not dirs:
             return None
-        return await self.exec(
+        return await self._exec_directory_command(
             self._empty_dirs_command(dirs, chmod=chmod),
             user=self._reset_dirs_user(),
         )
