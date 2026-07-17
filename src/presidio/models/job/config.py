@@ -6,6 +6,7 @@ import random
 
 from pydantic import BaseModel, Field, model_validator
 
+from presidio.errors import ErrorClass
 from presidio.models.metric.config import MetricConfig
 from presidio.models.task.id import GitTaskId, LocalTaskId, PackageTaskId
 from presidio.models.task.paths import TaskPaths
@@ -184,6 +185,10 @@ class DatasetConfig(BaseModel):
 class RetryConfig(BaseModel):
     max_retries: int = Field(
         default=0, description="Maximum number of retry attempts", ge=0
+    )
+    max_retries_by_class: dict[ErrorClass, int] | None = Field(
+        default=None,
+        description="Maximum retry attempts by classified error class",
     )
     include_exceptions: set[str] | None = Field(
         default=None,

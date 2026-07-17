@@ -3,6 +3,7 @@ import shutil
 from collections.abc import Coroutine
 from typing import Any
 
+from presidio.errors import ErrorClass
 from presidio.models.job.config import RetryConfig
 from presidio.models.trial.config import TrialConfig
 from presidio.models.trial.result import TrialResult
@@ -67,8 +68,27 @@ class TrialQueue:
         """Register a callback that runs when a queued trial is cancelled."""
         return self.add_hook(TrialEvent.CANCEL, callback)
 
-    def _should_retry_exception(self, exception_type: str) -> bool:
+    def _should_retry_exception(
+        self,
+        exception_type: str,
+        error_class: str | None = None,
+        attempt: int = 0,
+    ) -> bool:
         """Check if an exception should trigger a retry."""
+        if self._retry_config.max_retries_by_class is not None:
+            classified_error = self._resolve_error_class(error_class)
+
+            max_retries = self._retry_config.max_retries_by_class.get(
+                classified_error, 0
+            )
+            if attempt >= max_retries:
+                self._logger.debug(
+                    f"Exception {exception_type} classified as "
+                    f"{classified_error.value} has exhausted its retry budget"
+                )
+                return False
+            return True
+
         if (
             self._retry_config.exclude_exceptions
             and exception_type in self._retry_config.exclude_exceptions
@@ -89,6 +109,13 @@ class TrialQueue:
 
         return True
 
+    @staticmethod
+    def _resolve_error_class(error_class: str | None) -> ErrorClass:
+        try:
+            return ErrorClass(error_class or ErrorClass.UNKNOWN.value)
+        except ValueError:
+            return ErrorClass.UNKNOWN
+
     def _calculate_backoff_delay(self, attempt: int) -> float:
         """Calculate the backoff delay for a retry attempt."""
         delay = self._retry_config.min_wait_sec * (
@@ -108,7 +135,9 @@ class TrialQueue:
         """Execute a trial with retry logic."""
         from presidio.trial.trial import Trial
 
-        for attempt in range(self._retry_config.max_retries + 1):
+        attempt = 0
+        class_retry_counts: dict[ErrorClass, int] = {}
+        while True:
             trial = await Trial.create(trial_config)
             self._setup_hooks(trial)
             result = await trial.run()
@@ -133,21 +162,38 @@ class TrialQueue:
                 )
                 return result
 
-            if not self._should_retry_exception(result.exception_info.exception_type):
+            classified_error = self._resolve_error_class(
+                result.exception_info.error_class
+            )
+            class_attempt = class_retry_counts.get(classified_error, 0)
+            if not self._should_retry_exception(
+                result.exception_info.exception_type,
+                result.exception_info.error_class,
+                class_attempt,
+            ):
                 self._logger.debug(
                     "Not retrying trial because the exception is not in "
                     "include_exceptions or the maximum number of retries has been "
                     "reached"
                 )
                 return result
-            if attempt == self._retry_config.max_retries:
+            if (
+                self._retry_config.max_retries_by_class is None
+                and attempt == self._retry_config.max_retries
+            ):
                 self._logger.debug(
                     "Not retrying trial because the maximum number of retries has been "
                     "reached"
                 )
                 return result
 
-            shutil.rmtree(trial.trial_dir, ignore_errors=True)
+            class_retry_counts[classified_error] = class_attempt + 1
+            attempt_dir = trial.trial_dir / "attempts" / f"attempt-{attempt + 1}"
+            attempt_dir.mkdir(parents=True, exist_ok=True)
+            for path in list(trial.trial_dir.iterdir()):
+                if path.name == "attempts":
+                    continue
+                shutil.move(str(path), str(attempt_dir / path.name))
 
             delay = self._calculate_backoff_delay(attempt)
 
@@ -158,11 +204,7 @@ class TrialQueue:
             )
 
             await asyncio.sleep(delay)
-
-        raise RuntimeError(
-            f"Trial {trial_config.trial_name} produced no result. This should never "
-            "happen."
-        )
+            attempt += 1
 
     async def _run_trial(self, trial_config: TrialConfig) -> TrialResult:
         """Execute a single trial, acquiring the semaphore for concurrency control."""
