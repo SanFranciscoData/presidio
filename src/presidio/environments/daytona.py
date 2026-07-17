@@ -9,6 +9,7 @@ import random
 import shlex
 import socket
 import tempfile
+import time
 from abc import abstractmethod
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
@@ -90,6 +91,8 @@ DAYTONA_KEEPALIVE_MIN_INTERVAL_SEC = 60.0
 DAYTONA_CREATE_MAX_ATTEMPTS = 2
 DAYTONA_RATE_LIMIT_MAX_ATTEMPTS = 5
 DAYTONA_RATE_LIMIT_MAX_DELAY_SEC = 120.0
+DAYTONA_SESSION_COMMAND_GRACE_SEC = 60.0
+DAYTONA_SESSION_COMMAND_DEFAULT_TIMEOUT_SEC = 300.0
 
 
 def _mb_to_gib_ceil(mb: int) -> int:
@@ -1395,17 +1398,60 @@ class DaytonaEnvironment(BaseEnvironment):
             command_id,
         )
 
-    async def _poll_response(self, session_id: str, command_id: str) -> ExecResult:
+    @staticmethod
+    def _session_command_poll_timeout(timeout_sec: int | None) -> float:
+        if timeout_sec is None:
+            return DAYTONA_SESSION_COMMAND_DEFAULT_TIMEOUT_SEC
+        return timeout_sec + DAYTONA_SESSION_COMMAND_GRACE_SEC
+
+    async def _poll_response(
+        self,
+        session_id: str,
+        command_id: str,
+        *,
+        timeout_sec: int | None = None,
+        command: str = "",
+    ) -> ExecResult:
         if not self._sandbox:
             raise RuntimeError("Sandbox not found. Please build the environment first.")
 
-        response = await self._get_session_command_with_retry(session_id, command_id)
+        poll_timeout_sec = self._session_command_poll_timeout(timeout_sec)
+        deadline = time.monotonic() + poll_timeout_sec
+
+        async def get_response(current_command_id: str):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    "Daytona session command polling timed out "
+                    f"(session_id={session_id}, command_id={command_id}, "
+                    f"command={command!r})"
+                )
+            try:
+                return await asyncio.wait_for(
+                    self._get_session_command_with_retry(
+                        session_id,
+                        current_command_id,
+                    ),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError as e:
+                raise TimeoutError(
+                    "Daytona session command polling timed out "
+                    f"(session_id={session_id}, command_id={command_id}, "
+                    f"command={command!r})"
+                ) from e
+
+        response = await get_response(command_id)
         while response.exit_code is None:
-            await asyncio.sleep(1)
-            response = await self._get_session_command_with_retry(
-                session_id,
-                response.id,
-            )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    "Daytona session command polling timed out "
+                    f"(session_id={session_id}, command_id={command_id}, "
+                    f"command={command!r})"
+                )
+            await asyncio.sleep(min(1, remaining))
+            response = await get_response(response.id)
 
         logs = await self._get_session_command_logs_with_retry(session_id, command_id)
         return ExecResult(
@@ -1426,6 +1472,7 @@ class DaytonaEnvironment(BaseEnvironment):
         if not self._sandbox:
             raise RuntimeError("Sandbox not found. Please build the environment first.")
 
+        original_command = command
         session_id = str(uuid4())
         await self._sandbox.process.create_session(session_id)
 
@@ -1453,7 +1500,12 @@ class DaytonaEnvironment(BaseEnvironment):
         )
         if response.cmd_id is None:
             raise RuntimeError("Cannot find command ID.")
-        return await self._poll_response(session_id, response.cmd_id)
+        return await self._poll_response(
+            session_id,
+            response.cmd_id,
+            timeout_sec=timeout_sec,
+            command=original_command,
+        )
 
     @retry(
         stop=stop_after_attempt(2),
@@ -1542,7 +1594,18 @@ class DaytonaEnvironment(BaseEnvironment):
             await self._sandbox.fs.download_files(files=file_downloads)
 
     async def start(self, force_build: bool) -> None:
-        return await self._strategy.start(force_build)
+        try:
+            return await self._strategy.start(force_build)
+        except BaseException:
+            if self._sandbox is not None:
+                try:
+                    await self._strategy.stop(delete=True)
+                except Exception as cleanup_error:
+                    self.logger.warning(
+                        "Failed to clean up Daytona sandbox after start failure: "
+                        f"{cleanup_error}"
+                    )
+            raise
 
     async def stop(self, delete: bool) -> None:
         return await self._strategy.stop(delete)

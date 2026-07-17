@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import types
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
@@ -12,12 +13,14 @@ from pathlib import Path
 
 import pytest
 
+import presidio.environments.daytona as daytona_environment
 from presidio.environments.daytona import (
     DAYTONA_DEFAULT_AUTO_DELETE_INTERVAL_MINS,
     DAYTONA_DEFAULT_AUTO_STOP_INTERVAL_MINS,
     DAYTONA_KEEPALIVE_MIN_INTERVAL_SEC,
     DAYTONA_OWNER_LABEL,
     DAYTONA_RATE_LIMIT_MAX_ATTEMPTS,
+    DAYTONA_SESSION_COMMAND_GRACE_SEC,
     DaytonaEnvironment,
     _mb_to_gib_ceil,
     _retry_after_seconds,
@@ -299,6 +302,98 @@ def test_cleanup_orphans_deletes_only_owned_sandboxes(tmp_path):
 
     assert deleted == ["orphan-1", "orphan-2"]
     assert listed_labels == [{DAYTONA_OWNER_LABEL: env._owner_token}]
+
+
+# --- session command polling ------------------------------------------------
+
+
+def test_session_command_poll_timeout_is_bounded(tmp_path, monkeypatch):
+    env = _make_env(tmp_path)
+    env._sandbox = types.SimpleNamespace()
+    monkeypatch.setattr(
+        daytona_environment,
+        "DAYTONA_SESSION_COMMAND_DEFAULT_TIMEOUT_SEC",
+        0.01,
+    )
+
+    async def get_response(session_id, command_id):
+        return types.SimpleNamespace(exit_code=None, id=command_id)
+
+    env._get_session_command_with_retry = get_response  # type: ignore[method-assign]
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match="session_id=session-1"):
+        asyncio.run(
+            env._poll_response(
+                "session-1",
+                "command-1",
+                command="mkdir -p /logs",
+            )
+        )
+    assert time.monotonic() - started < 1
+
+
+def test_session_command_poll_returns_terminal_response(tmp_path, monkeypatch):
+    env = _make_env(tmp_path)
+    env._sandbox = types.SimpleNamespace()
+    responses = iter(
+        [
+            types.SimpleNamespace(exit_code=None, id="command-1"),
+            types.SimpleNamespace(exit_code=0, id="command-1"),
+        ]
+    )
+    logs = types.SimpleNamespace(stdout="out", stderr="err")
+
+    async def get_response(session_id, command_id):
+        return next(responses)
+
+    async def get_logs(session_id, command_id):
+        return logs
+
+    async def fake_sleep(delay):
+        assert delay <= 1
+
+    env._get_session_command_with_retry = get_response  # type: ignore[method-assign]
+    env._get_session_command_logs_with_retry = get_logs  # type: ignore[method-assign]
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    result = asyncio.run(
+        env._poll_response(
+            "session-1",
+            "command-1",
+            timeout_sec=30,
+            command="mkdir -p /logs",
+        )
+    )
+
+    assert result.stdout == "out"
+    assert result.stderr == "err"
+    assert result.return_code == 0
+
+
+def test_explicit_session_timeout_includes_grace():
+    assert (
+        DaytonaEnvironment._session_command_poll_timeout(600)
+        == 600 + DAYTONA_SESSION_COMMAND_GRACE_SEC
+    )
+
+
+def test_start_failure_cleans_up_created_sandbox(tmp_path):
+    env = _make_env(tmp_path)
+    env._sandbox = types.SimpleNamespace()
+    stopped: list[bool] = []
+
+    async def fail_start(force_build):
+        raise RuntimeError("setup failed")
+
+    async def stop(delete):
+        stopped.append(delete)
+
+    env._strategy = types.SimpleNamespace(start=fail_start, stop=stop)
+
+    with pytest.raises(RuntimeError, match="setup failed"):
+        asyncio.run(env.start(force_build=False))
+
+    assert stopped == [True]
 
 
 # --- sandbox keepalive (defeat auto-stop for long, active phases) -----------
