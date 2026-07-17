@@ -76,3 +76,9 @@ def test_exception_info_serializes_error_class():
             "occurred_at": info.occurred_at,
         }
     ).error_class is None
+
+
+def test_agent_setup_timeout_is_provider_transient():
+    from presidio.trial.execution import AgentSetupTimeoutError
+
+    assert classify(AgentSetupTimeoutError()) is ErrorClass.PROVIDER_TRANSIENT

@@ -40,6 +40,7 @@ def classify(exc: BaseException) -> ErrorClass:
     from presidio.agents.installed.base import NonZeroAgentExitCodeError
     from presidio.environments.base import HealthcheckError
     from presidio.trial.execution import (
+        AgentSetupTimeoutError,
         AgentTimeoutError,
         EnvironmentStartTimeoutError,
     )
@@ -66,10 +67,12 @@ def classify(exc: BaseException) -> ErrorClass:
             _matching_classes(
                 DaytonaNotFoundError,
                 DaytonaError,
+                AgentSetupTimeoutError,
                 EnvironmentStartTimeoutError,
                 HealthcheckError,
             ),
             {
+                "AgentSetupTimeoutError",
                 "DaytonaNotFoundError",
                 "DaytonaError",
                 "DaytonaConnectionError",
