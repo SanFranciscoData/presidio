@@ -15,6 +15,7 @@ import pytest
 from presidio.environments.daytona import (
     DAYTONA_DEFAULT_AUTO_DELETE_INTERVAL_MINS,
     DAYTONA_DEFAULT_AUTO_STOP_INTERVAL_MINS,
+    DAYTONA_KEEPALIVE_MIN_INTERVAL_SEC,
     DAYTONA_OWNER_LABEL,
     DAYTONA_RATE_LIMIT_MAX_ATTEMPTS,
     DaytonaEnvironment,
@@ -298,3 +299,60 @@ def test_cleanup_orphans_deletes_only_owned_sandboxes(tmp_path):
 
     assert deleted == ["orphan-1", "orphan-2"]
     assert listed_labels == [{DAYTONA_OWNER_LABEL: env._owner_token}]
+
+
+# --- sandbox keepalive (defeat auto-stop for long, active phases) -----------
+
+
+class _StubKeepaliveSandbox:
+    def __init__(self) -> None:
+        self.id = "ka-sandbox"
+        self.refresh_calls = 0
+        self.deleted = False
+
+    async def refresh_activity(self) -> None:
+        self.refresh_calls += 1
+
+    async def delete(self) -> None:
+        self.deleted = True
+
+
+def test_keepalive_interval_is_fraction_of_autostop(tmp_path):
+    env = _make_env(tmp_path, auto_stop_interval_mins=60)
+    # 60 min / divisor(4) = 15 min = 900s, well under the 3600s deadline.
+    assert env._keepalive_interval_sec() == 900.0
+
+
+def test_keepalive_interval_respects_floor(tmp_path):
+    env = _make_env(tmp_path, auto_stop_interval_mins=1)
+    assert env._keepalive_interval_sec() == DAYTONA_KEEPALIVE_MIN_INTERVAL_SEC
+
+
+def test_keepalive_refreshes_then_stop_cancels(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        DaytonaEnvironment, "_keepalive_interval_sec", lambda self: 0.01
+    )
+
+    async def scenario() -> _StubKeepaliveSandbox:
+        env = _make_env(tmp_path, auto_stop_interval_mins=60)
+        sandbox = _StubKeepaliveSandbox()
+        env._sandbox = sandbox  # type: ignore[assignment]
+        env._start_keepalive()
+        assert env._keepalive_task is not None
+        await asyncio.sleep(0.05)
+        await env._stop_sandbox()
+        # _stop_sandbox cancels the keepalive and deletes the sandbox.
+        assert env._keepalive_task is None
+        return sandbox
+
+    sandbox = asyncio.run(scenario())
+    assert sandbox.refresh_calls > 0
+    assert sandbox.deleted
+
+
+def test_keepalive_not_started_when_autostop_disabled(tmp_path):
+    env = _make_env(tmp_path, auto_stop_interval_mins=0)
+    env._sandbox = _StubKeepaliveSandbox()  # type: ignore[assignment]
+    env._start_keepalive()
+    # auto-stop disabled => the sandbox never idles out => no keepalive task.
+    assert env._keepalive_task is None

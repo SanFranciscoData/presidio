@@ -77,6 +77,16 @@ DAYTONA_MAX_NETWORK_ALLOWLIST_CIDRS = 10
 DAYTONA_OWNER_LABEL = "presidio.owner-token"
 DAYTONA_DEFAULT_AUTO_STOP_INTERVAL_MINS = 60
 DAYTONA_DEFAULT_AUTO_DELETE_INTERVAL_MINS = 0
+# Daytona auto-stops a sandbox after its inactivity interval even while a process
+# runs inside it (a background command is not enough to keep it alive; only
+# lifecycle/activity API calls reset the timer). A long agent phase (e.g. a
+# ~2h calibration tier) can therefore be reaped mid-run at the 60-min default.
+# A background keepalive calls `refresh_activity()` at this cadence -- a fraction
+# of the auto-stop interval so a single hiccup cannot let the sandbox go idle
+# past the deadline. The harness's own phase timeouts remain the only thing that
+# ends a run; when auto-stop is disabled (0) no keepalive is started.
+DAYTONA_KEEPALIVE_INTERVAL_DIVISOR = 4
+DAYTONA_KEEPALIVE_MIN_INTERVAL_SEC = 60.0
 DAYTONA_CREATE_MAX_ATTEMPTS = 2
 DAYTONA_RATE_LIMIT_MAX_ATTEMPTS = 5
 DAYTONA_RATE_LIMIT_MAX_DELAY_SEC = 120.0
@@ -914,6 +924,7 @@ class DaytonaEnvironment(BaseEnvironment):
         }
         self._snapshot_template_name = snapshot_template_name
         self._sandbox: AsyncSandbox | None = None
+        self._keepalive_task: asyncio.Task[None] | None = None
         self._client_manager: DaytonaClientManager | None = None
         self._resolved_network_allow_list: str | None = None
         self._network_resolution_debug: dict[str, Any] = {}
@@ -1282,6 +1293,7 @@ class DaytonaEnvironment(BaseEnvironment):
         )
         try:
             self._sandbox = await asyncio.shield(create_task)
+            self._start_keepalive()
         except asyncio.CancelledError:
             try:
                 sandbox = await asyncio.wait_for(create_task, timeout=30)
@@ -1296,12 +1308,63 @@ class DaytonaEnvironment(BaseEnvironment):
                 create_task.cancel()
             raise
 
+    def _keepalive_interval_sec(self) -> float:
+        """Cadence for the background activity refresh.
+
+        A fraction of the auto-stop interval (floored) so the inactivity timer
+        is always reset well before the deadline, even if one refresh is skipped.
+        """
+        return max(
+            DAYTONA_KEEPALIVE_MIN_INTERVAL_SEC,
+            (self._auto_stop_interval * 60) / DAYTONA_KEEPALIVE_INTERVAL_DIVISOR,
+        )
+
+    async def _keepalive_loop(self) -> None:
+        """Periodically reset the sandbox inactivity timer while it is alive.
+
+        Daytona reaps an idle sandbox at its auto-stop interval regardless of
+        in-sandbox work, so an actively-progressing long phase must externally
+        signal activity. The harness's phase timeouts remain the only thing that
+        aborts a run; ``stop()``/``_stop_sandbox`` cancels this loop.
+        """
+        interval = self._keepalive_interval_sec()
+        while self._sandbox is not None:
+            try:
+                await asyncio.sleep(interval)
+                if self._sandbox is None:
+                    return
+                await self._sandbox.refresh_activity()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - network/SDK errors
+                self.logger.warning(
+                    "Daytona keepalive refresh_activity failed: %s", exc
+                )
+
+    def _start_keepalive(self) -> None:
+        # auto-stop disabled (0) => the sandbox never idles out, so no keepalive.
+        if self._auto_stop_interval <= 0 or self._keepalive_task is not None:
+            return
+        self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+
+    async def _cancel_keepalive(self) -> None:
+        task = self._keepalive_task
+        self._keepalive_task = None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
     @retry(
         stop=stop_after_attempt(2),
         wait=wait_exponential(multiplier=1, min=1, max=10),
         reraise=True,
     )
     async def _stop_sandbox(self) -> None:
+        await self._cancel_keepalive()
         if self._sandbox:
             await self._sandbox.delete()
 
