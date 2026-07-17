@@ -10,6 +10,7 @@ from presidio.agents.installed.base import (
     with_prompt_template,
 )
 from presidio.agents.network import allowlist_from_urls
+from presidio.errors import InvalidModelError
 from presidio.environments.base import BaseEnvironment
 from presidio.models.agent.context import AgentContext
 from presidio.models.agent.install import AgentInstallSpec, InstallStep
@@ -711,7 +712,9 @@ class GeminiCli(BaseInstalledAgent):
         escaped_instruction = shlex.quote(instruction)
 
         if not self.model_name or "/" not in self.model_name:
-            raise ValueError("Model name must be in the format provider/model_name")
+            raise InvalidModelError(
+                "Model name must be in the format provider/model_name"
+            )
 
         model = self.model_name.split("/")[-1]
 
