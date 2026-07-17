@@ -11,8 +11,11 @@ import litellm
 
 from presidio.errors import (
     EgressMisconfigError,
+    CREDENTIAL_MARKERS,
     InvalidModelError,
     MissingCredentialError,
+    MODEL_NOT_FOUND_MARKERS,
+    message_matches_markers,
 )
 from presidio.models.agent.network import NetworkAllowlist
 from presidio.models.environment_type import EnvironmentType
@@ -31,31 +34,9 @@ class ModelCheckResult:
 
 def _model_error(exc: Exception, model: str) -> Exception:
     text = f"{type(exc).__name__}: {exc}".lower()
-    if any(
-        marker in text
-        for marker in (
-            "authentication",
-            "unauthorized",
-            "permission",
-            "api key",
-            "credential",
-            "invalid x-api-key",
-            "authenticationerror",
-        )
-    ):
+    if message_matches_markers(text, CREDENTIAL_MARKERS):
         return MissingCredentialError(f"Missing credentials for model {model}: {exc}")
-    if any(
-        marker in text
-        for marker in (
-            "model not found",
-            "model_not_found",
-            "does not exist",
-            "invalid model",
-            "unknown model",
-            "modelnotfound",
-            "unknownmodel",
-        )
-    ):
+    if message_matches_markers(text, MODEL_NOT_FOUND_MARKERS):
         return InvalidModelError(f"Invalid model {model}: {exc}")
     return exc
 
@@ -175,7 +156,8 @@ async def probe_egress(
                 await env.start(force_build=False)
                 for host in hosts:
                     result = await env.exec(
-                        f"curl -sf --max-time 10 https://{host}",
+                        f"curl -sS --max-time 10 -o /dev/null -w '%{{http_code}}' "
+                        f"https://{host}",
                         timeout_sec=15,
                     )
                     if result.return_code != 0:
@@ -183,7 +165,11 @@ async def probe_egress(
                             f"Egress probe failed for {host}: "
                             f"{result.stderr or result.stdout}"
                         )
-                    output(f"{host}: pass")
+                    status = (result.stdout or "").strip()
+                    if status:
+                        output(f"{host}: pass (HTTP {status})")
+                    else:
+                        output(f"{host}: pass")
             except EgressMisconfigError:
                 raise
             except Exception as exc:
