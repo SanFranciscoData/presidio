@@ -3,6 +3,7 @@ import json
 import pytest
 
 from presidio.errors import (
+    EgressMisconfigError,
     ErrorClass,
     InvalidModelError,
     MissingCredentialError,
@@ -16,6 +17,7 @@ from presidio.models.trial.result import ExceptionInfo
     [
         (InvalidModelError("bad model"), ErrorClass.CONFIG_FATAL),
         (MissingCredentialError("missing key"), ErrorClass.CONFIG_FATAL),
+        (EgressMisconfigError("blocked host"), ErrorClass.EGRESS_MISCONFIG),
     ],
 )
 def test_classify_configuration_errors(exception, expected):

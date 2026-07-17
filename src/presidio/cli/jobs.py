@@ -30,6 +30,7 @@ from presidio.models.trial.config import (
 )
 from presidio.models.trial.paths import TrialPaths
 from presidio.models.trial.result import TrialResult
+from presidio.preflight import run_preflight
 
 jobs_app = Typer(
     no_args_is_help=True, context_settings={"help_option_names": ["-h", "--help"]}
@@ -163,6 +164,24 @@ def start(
             show_default=False,
         ),
     ] = None,
+    skip_preflight: Annotated[
+        bool,
+        Option(
+            "--skip-preflight",
+            help="Skip the automatic model credential preflight",
+            rich_help_panel="Job Settings",
+            show_default=False,
+        ),
+    ] = False,
+    preflight_egress: Annotated[
+        bool,
+        Option(
+            "--preflight-egress",
+            help="Also probe configured egress hosts before running",
+            rich_help_panel="Job Settings",
+            show_default=False,
+        ),
+    ] = False,
     job_name: Annotated[
         str | None,
         Option(
@@ -776,6 +795,14 @@ def start(
         type=config.environment.type,
         import_path=config.environment.import_path,
     )
+    if not skip_preflight:
+        run_async(
+            run_preflight(
+                config,
+                include_egress=preflight_egress,
+                output=console.print,
+            )
+        )
 
     explicit_env_file_keys: set[str] = set()
     if env_file is not None:

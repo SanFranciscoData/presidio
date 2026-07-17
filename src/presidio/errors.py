@@ -33,6 +33,10 @@ class MissingCredentialError(ValueError):
     pass
 
 
+class EgressMisconfigError(ValueError):
+    pass
+
+
 def _matching_classes(
     *classes: type[BaseException] | None,
 ) -> tuple[type[BaseException], ...]:
@@ -90,6 +94,11 @@ def classify(exc: BaseException) -> ErrorClass:
             ErrorClass.CONFIG_FATAL,
             (InvalidModelError, MissingCredentialError),
             {"InvalidModelError", "MissingCredentialError"},
+        ),
+        (
+            ErrorClass.EGRESS_MISCONFIG,
+            (EgressMisconfigError,),
+            {"EgressMisconfigError"},
         ),
         (
             ErrorClass.PROVIDER_TRANSIENT,
