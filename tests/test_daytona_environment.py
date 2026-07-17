@@ -377,6 +377,40 @@ def test_explicit_session_timeout_includes_grace():
     )
 
 
+def test_daytona_directory_layer_restores_dockerfile_user(tmp_path):
+    env = _make_env(tmp_path)
+    env._dockerfile_path.write_text("FROM alpine\nUSER user\n")
+
+    image = env._with_daytona_directory_layer(
+        daytona.Image.from_dockerfile(env._dockerfile_path),
+        runtime_user=env._dockerfile_runtime_user(),
+    )
+
+    dockerfile = image.dockerfile()
+    assert "USER root" in dockerfile
+    assert (
+        "RUN mkdir -p /logs /logs/agent /logs/verifier /logs/artifacts "
+        "/tests /solution && chmod -R 777 /logs /tests /solution"
+    ) in dockerfile
+    assert dockerfile.rstrip().endswith("USER user")
+
+
+def test_provision_directories_skips_existing_directories(tmp_path):
+    env = _make_env(tmp_path)
+    env._sandbox = types.SimpleNamespace(fs=types.SimpleNamespace())
+    calls: list[str] = []
+
+    async def is_dir(path, user=None):
+        calls.append(path)
+        return True
+
+    env._strategy.is_dir = is_dir  # type: ignore[method-assign]
+
+    asyncio.run(env._provision_directories())
+
+    assert len(calls) == 6
+
+
 # --- sandbox keepalive (defeat auto-stop for long, active phases) -----------
 
 

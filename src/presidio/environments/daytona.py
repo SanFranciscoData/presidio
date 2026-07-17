@@ -6,6 +6,7 @@ import email.utils
 import ipaddress
 import os
 import random
+import re
 import shlex
 import socket
 import tempfile
@@ -372,7 +373,9 @@ class _DaytonaDirect(_DaytonaStrategy):
                 **env._base_sandbox_params(),
             )
         elif force_build or not env.task_env_config.docker_image:
+            runtime_user = env._dockerfile_runtime_user()
             image = env._with_agent_install(Image.from_dockerfile(env._dockerfile_path))
+            image = env._with_daytona_directory_layer(image, runtime_user=runtime_user)
             kwargs = {
                 "image": image,
                 **env._base_sandbox_params(),
@@ -385,6 +388,14 @@ class _DaytonaDirect(_DaytonaStrategy):
         else:
             image = env._with_agent_install(
                 Image.base(env.task_env_config.docker_image)
+            )
+            image = env._with_daytona_directory_layer(
+                image,
+                runtime_user=(
+                    env._resolve_user(None)
+                    if hasattr(env, "default_user")
+                    else None
+                ),
             )
             kwargs = {
                 "image": image,
@@ -1016,9 +1027,17 @@ class DaytonaEnvironment(BaseEnvironment):
             EnvironmentPaths.tests_dir,
             EnvironmentPaths.solution_dir,
         )
+        strategy = getattr(self, "_strategy", None)
         for path in paths:
-            await self._sandbox.fs.create_folder(str(path), "777")
-            await self._sandbox.fs.set_file_permissions(str(path), mode="777")
+            path_str = str(path)
+            if strategy is not None and await strategy.is_dir(path_str):
+                continue
+            try:
+                await self._sandbox.fs.create_folder(path_str, "777")
+                await self._sandbox.fs.set_file_permissions(path_str, mode="777")
+            except Exception:
+                if strategy is None or not await strategy.is_dir(path_str):
+                    raise
 
     @property
     def capabilities(self) -> EnvironmentCapabilities:
@@ -1061,6 +1080,39 @@ class DaytonaEnvironment(BaseEnvironment):
             install,
             user=self._resolve_user(None),
         )
+        return image.dockerfile_commands(commands)
+
+    def _dockerfile_runtime_user(self) -> str | None:
+        runtime_user = None
+        for line in self._dockerfile_path.read_text().splitlines():
+            line_without_comment = line.split("#", 1)[0].strip()
+            match = re.match(r"(?i)^USER\s+(.+?)\s*$", line_without_comment)
+            if match:
+                runtime_user = match.group(1)
+        return runtime_user
+
+    @staticmethod
+    def _non_root_user(user: str | int | None) -> str | None:
+        if user is None:
+            return None
+        value = str(user).strip()
+        if not value or value.lower() == "root" or value == "0":
+            return None
+        return value
+
+    def _with_daytona_directory_layer(
+        self,
+        image: Image,
+        *,
+        runtime_user: str | int | None,
+    ) -> Image:
+        commands = [
+            "USER root",
+            "RUN mkdir -p /logs /logs/agent /logs/verifier /logs/artifacts "
+            "/tests /solution && chmod -R 777 /logs /tests /solution",
+        ]
+        if restore_user := self._non_root_user(runtime_user):
+            commands.append(f"USER {restore_user}")
         return image.dockerfile_commands(commands)
 
     def _network_params(self) -> dict[str, Any]:
