@@ -233,6 +233,7 @@ class JobConfig(BaseModel):
     n_concurrent_trials: int = 4
     quiet: bool = Field(default=False, description="Suppress trial progress displays")
     retry: RetryConfig = Field(default_factory=RetryConfig)
+    fail_fast: bool = True
     environment: EnvironmentConfig = Field(default_factory=EnvironmentConfig)
     verifier: VerifierConfig = Field(default_factory=VerifierConfig)
     metrics: list[MetricConfig] = Field(default_factory=list)
