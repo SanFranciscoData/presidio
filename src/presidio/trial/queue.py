@@ -140,8 +140,7 @@ class TrialQueue:
 
     @staticmethod
     def cohort_key(trial_config: TrialConfig) -> str:
-        agent = getattr(trial_config, "agent", None)
-        payload = agent.model_dump(mode="json") if agent is not None else {}
+        payload = trial_config.agent.model_dump(mode="json")
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(encoded.encode()).hexdigest()[:16]
 
