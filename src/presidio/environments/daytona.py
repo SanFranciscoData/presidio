@@ -1594,18 +1594,7 @@ class DaytonaEnvironment(BaseEnvironment):
             await self._sandbox.fs.download_files(files=file_downloads)
 
     async def start(self, force_build: bool) -> None:
-        try:
-            return await self._strategy.start(force_build)
-        except BaseException:
-            if self._sandbox is not None:
-                try:
-                    await self._strategy.stop(delete=True)
-                except Exception as cleanup_error:
-                    self.logger.warning(
-                        "Failed to clean up Daytona sandbox after start failure: "
-                        f"{cleanup_error}"
-                    )
-            raise
+        return await self._strategy.start(force_build)
 
     async def stop(self, delete: bool) -> None:
         return await self._strategy.stop(delete)

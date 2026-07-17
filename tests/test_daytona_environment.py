@@ -377,25 +377,6 @@ def test_explicit_session_timeout_includes_grace():
     )
 
 
-def test_start_failure_cleans_up_created_sandbox(tmp_path):
-    env = _make_env(tmp_path)
-    env._sandbox = types.SimpleNamespace()
-    stopped: list[bool] = []
-
-    async def fail_start(force_build):
-        raise RuntimeError("setup failed")
-
-    async def stop(delete):
-        stopped.append(delete)
-
-    env._strategy = types.SimpleNamespace(start=fail_start, stop=stop)
-
-    with pytest.raises(RuntimeError, match="setup failed"):
-        asyncio.run(env.start(force_build=False))
-
-    assert stopped == [True]
-
-
 # --- sandbox keepalive (defeat auto-stop for long, active phases) -----------
 
 
