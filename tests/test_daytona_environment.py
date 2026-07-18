@@ -411,6 +411,45 @@ def test_provision_directories_skips_existing_directories(tmp_path):
     assert len(calls) == 6
 
 
+def test_daytona_root_toolbox_keeps_su_wrapper(tmp_path, monkeypatch):
+    env = _make_env(tmp_path)
+
+    async def effective_user():
+        return (0, "root")
+
+    monkeypatch.setattr(env, "_get_daytona_effective_user", effective_user)
+
+    assert asyncio.run(env._daytona_su_target("user")) == "user"
+
+
+def test_daytona_non_root_toolbox_skips_su_for_same_user(tmp_path, monkeypatch):
+    env = _make_env(tmp_path)
+
+    async def effective_user():
+        return (1000, "user")
+
+    monkeypatch.setattr(env, "_get_daytona_effective_user", effective_user)
+
+    assert asyncio.run(env._daytona_su_target("user")) is None
+    assert asyncio.run(env._daytona_su_target(1000)) is None
+
+
+def test_daytona_non_root_toolbox_skips_su_for_different_user(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    env = _make_env(tmp_path)
+
+    async def effective_user():
+        return (1000, "user")
+
+    monkeypatch.setattr(env, "_get_daytona_effective_user", effective_user)
+
+    assert asyncio.run(env._daytona_su_target("root")) is None
+    assert "without runtime privilege escalation" in caplog.text
+
+
 # --- sandbox keepalive (defeat auto-stop for long, active phases) -----------
 
 

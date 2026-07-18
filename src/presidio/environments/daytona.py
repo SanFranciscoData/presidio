@@ -938,6 +938,8 @@ class DaytonaEnvironment(BaseEnvironment):
         }
         self._snapshot_template_name = snapshot_template_name
         self._sandbox: AsyncSandbox | None = None
+        self._daytona_effective_user_cache: tuple[int | None, str] | None = None
+        self._daytona_effective_user_lock = asyncio.Lock()
         self._keepalive_task: asyncio.Task[None] | None = None
         self._client_manager: DaytonaClientManager | None = None
         self._resolved_network_allow_list: str | None = None
@@ -1348,6 +1350,7 @@ class DaytonaEnvironment(BaseEnvironment):
         )
         try:
             self._sandbox = await asyncio.shield(create_task)
+            self._daytona_effective_user_cache = None
             self._start_keepalive()
         except asyncio.CancelledError:
             try:
@@ -1538,7 +1541,8 @@ class DaytonaEnvironment(BaseEnvironment):
             command = f"timeout {timeout_sec} {command}"
         if cwd:
             command = f"cd {shlex.quote(cwd)} && {command}"
-        if user is not None:
+        su_target = await self._daytona_su_target(user)
+        if su_target is not None:
             if isinstance(user, int):
                 user_arg = f"$(getent passwd {user} | cut -d: -f1)"
             else:
@@ -1558,6 +1562,76 @@ class DaytonaEnvironment(BaseEnvironment):
             timeout_sec=timeout_sec,
             command=original_command,
         )
+
+    async def _get_daytona_effective_user(self) -> tuple[int | None, str]:
+        if self._daytona_effective_user_cache is not None:
+            return self._daytona_effective_user_cache
+
+        async with self._daytona_effective_user_lock:
+            if self._daytona_effective_user_cache is not None:
+                return self._daytona_effective_user_cache
+            if not self._sandbox:
+                raise RuntimeError(
+                    "Sandbox not found. Please build the environment first."
+                )
+
+            session_id = str(uuid4())
+            await self._sandbox.process.create_session(session_id)
+            response = await self._sandbox.process.execute_session_command(
+                session_id,
+                SessionExecuteRequest(
+                    command="id -u; id -un",
+                    run_async=True,
+                ),
+                timeout=10,
+            )
+            if response.cmd_id is None:
+                raise RuntimeError("Cannot find command ID.")
+            result = await self._poll_response(
+                session_id,
+                response.cmd_id,
+                timeout_sec=10,
+                command="id -u; id -un",
+            )
+            lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            uid: int | None = None
+            if lines and lines[0].isdigit():
+                uid = int(lines[0])
+            username = lines[-1] if lines else ""
+            self._daytona_effective_user_cache = (uid, username)
+            return self._daytona_effective_user_cache
+
+    @staticmethod
+    def _daytona_user_matches(
+        effective_user: tuple[int | None, str],
+        target_user: str | int,
+    ) -> bool:
+        effective_uid, effective_name = effective_user
+        if isinstance(target_user, int):
+            return effective_uid == target_user
+        target = str(target_user)
+        if target.isdigit():
+            return effective_uid == int(target)
+        return target == effective_name
+
+    async def _daytona_su_target(self, user: str | int | None) -> str | int | None:
+        if user is None or self._compose_mode:
+            return user
+
+        effective_user = await self._get_daytona_effective_user()
+        effective_uid, effective_name = effective_user
+        if effective_uid == 0 or effective_name == "root":
+            return user
+        if self._daytona_user_matches(effective_user, user):
+            return None
+
+        self.logger.warning(
+            "Daytona direct sandbox runs as non-root user %r; executing command "
+            "requested as %r without runtime privilege escalation",
+            effective_name or effective_uid,
+            user,
+        )
+        return None
 
     @retry(
         stop=stop_after_attempt(2),
