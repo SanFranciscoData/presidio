@@ -30,6 +30,28 @@ def test_classify_provider_quota_error():
 
 
 @pytest.mark.parametrize(
+    "message",
+    [
+        "Failed to create sandbox: Total memory limit exceeded. "
+        "Maximum allowed: 1000GiB.",
+        "Failed to create sandbox: Total CPU limit exceeded. Maximum allowed: 500.",
+    ],
+)
+def test_classify_daytona_capacity_limit_is_provider_quota(message):
+    daytona = pytest.importorskip("daytona")
+    assert classify(daytona.DaytonaValidationError(message)) is (
+        ErrorClass.PROVIDER_QUOTA
+    )
+
+
+def test_classify_daytona_invalid_request_stays_provider_transient():
+    daytona = pytest.importorskip("daytona")
+    assert classify(
+        daytona.DaytonaValidationError("Invalid snapshot name")
+    ) is ErrorClass.PROVIDER_TRANSIENT
+
+
+@pytest.mark.parametrize(
     "exception",
     [
         type("DaytonaNotFoundError", (Exception,), {})(),

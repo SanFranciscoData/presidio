@@ -1,6 +1,15 @@
 from enum import Enum
 
 
+# Daytona org-level capacity/quota exhaustion. These surface as
+# DaytonaValidationError with messages like "Failed to create sandbox: Total
+# memory limit exceeded. Maximum allowed: 1000GiB." or "Total CPU limit
+# exceeded. Maximum allowed: 500." Unlike genuinely invalid requests, these are
+# org-wide capacity conditions that clear once usage drops, so they belong in
+# provider_quota rather than provider_transient.
+CAPACITY_LIMIT_MARKERS = ("limit exceeded",)
+
+
 class ErrorClass(str, Enum):
     CONFIG_FATAL = "config_fatal"
     EGRESS_MISCONFIG = "egress_misconfig"
@@ -31,11 +40,26 @@ def classify(exc: BaseException) -> ErrorClass:
             DaytonaError,
             DaytonaNotFoundError,
             DaytonaRateLimitError,
+            DaytonaValidationError,
         )
     except ImportError:
         DaytonaError = None
         DaytonaNotFoundError = None
         DaytonaRateLimitError = None
+        DaytonaValidationError = None
+
+    # Daytona capacity/quota exhaustion arrives as a DaytonaValidationError
+    # whose message reports an org-level limit being exceeded. Match on the
+    # capacity condition rather than the class, since DaytonaValidationError
+    # also covers genuinely invalid requests (which stay provider_transient via
+    # the DaytonaError rule below).
+    is_daytona_validation = (
+        DaytonaValidationError is not None and isinstance(exc, DaytonaValidationError)
+    ) or type(exc).__name__ == "DaytonaValidationError"
+    if is_daytona_validation and message_matches_markers(
+        str(exc), CAPACITY_LIMIT_MARKERS
+    ):
+        return ErrorClass.PROVIDER_QUOTA
 
     from presidio.agents.installed.base import NonZeroAgentExitCodeError
     from presidio.environments.base import HealthcheckError
