@@ -1491,14 +1491,17 @@ class DaytonaEnvironment(BaseEnvironment):
         poll_timeout_sec = self._session_command_poll_timeout(timeout_sec)
         deadline = time.monotonic() + poll_timeout_sec
 
+        def _timed_out() -> TimeoutError:
+            return TimeoutError(
+                "Daytona session command polling timed out "
+                f"(session_id={session_id}, command_id={command_id}, "
+                f"command={command!r})"
+            )
+
         async def get_response(current_command_id: str):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(
-                    "Daytona session command polling timed out "
-                    f"(session_id={session_id}, command_id={command_id}, "
-                    f"command={command!r})"
-                )
+                raise _timed_out()
             try:
                 return await asyncio.wait_for(
                     self._get_session_command_with_retry(
@@ -1508,21 +1511,13 @@ class DaytonaEnvironment(BaseEnvironment):
                     timeout=remaining,
                 )
             except asyncio.TimeoutError as e:
-                raise TimeoutError(
-                    "Daytona session command polling timed out "
-                    f"(session_id={session_id}, command_id={command_id}, "
-                    f"command={command!r})"
-                ) from e
+                raise _timed_out() from e
 
         response = await get_response(command_id)
         while response.exit_code is None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(
-                    "Daytona session command polling timed out "
-                    f"(session_id={session_id}, command_id={command_id}, "
-                    f"command={command!r})"
-                )
+                raise _timed_out()
             await asyncio.sleep(min(1, remaining))
             response = await get_response(response.id)
 
