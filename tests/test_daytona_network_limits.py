@@ -229,21 +229,23 @@ def test_daytona_direct_provisions_canonical_directories():
 
     asyncio.run(env._provision_directories())
 
+    # /logs/* world-writable; /tests and /solution 0755 (anti-cheat: the agent
+    # must not be able to overwrite the verifier tests or oracle solution).
     assert create_folder.await_args_list == [
         call(str(EnvironmentPaths.logs_dir), "777"),
         call(str(EnvironmentPaths.agent_dir), "777"),
         call(str(EnvironmentPaths.verifier_dir), "777"),
         call(str(EnvironmentPaths.artifacts_dir), "777"),
-        call(str(EnvironmentPaths.tests_dir), "777"),
-        call(str(EnvironmentPaths.solution_dir), "777"),
+        call(str(EnvironmentPaths.tests_dir), "755"),
+        call(str(EnvironmentPaths.solution_dir), "755"),
     ]
     assert set_file_permissions.await_args_list == [
         call(str(EnvironmentPaths.logs_dir), mode="777"),
         call(str(EnvironmentPaths.agent_dir), mode="777"),
         call(str(EnvironmentPaths.verifier_dir), mode="777"),
         call(str(EnvironmentPaths.artifacts_dir), mode="777"),
-        call(str(EnvironmentPaths.tests_dir), mode="777"),
-        call(str(EnvironmentPaths.solution_dir), mode="777"),
+        call(str(EnvironmentPaths.tests_dir), mode="755"),
+        call(str(EnvironmentPaths.solution_dir), mode="755"),
     ]
 
 

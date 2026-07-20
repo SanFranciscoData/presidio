@@ -1021,22 +1021,25 @@ class DaytonaEnvironment(BaseEnvironment):
         if not self._sandbox:
             raise RuntimeError("Sandbox not found. Please build the environment first.")
 
+        # /logs/* are world-writable (agent + verifier log writes); /tests and
+        # /solution are 0755 so the agent cannot tamper with the verifier's
+        # tests or the oracle solution (see _with_daytona_directory_layer).
         paths = (
-            EnvironmentPaths.logs_dir,
-            EnvironmentPaths.agent_dir,
-            EnvironmentPaths.verifier_dir,
-            EnvironmentPaths.artifacts_dir,
-            EnvironmentPaths.tests_dir,
-            EnvironmentPaths.solution_dir,
+            (EnvironmentPaths.logs_dir, "777"),
+            (EnvironmentPaths.agent_dir, "777"),
+            (EnvironmentPaths.verifier_dir, "777"),
+            (EnvironmentPaths.artifacts_dir, "777"),
+            (EnvironmentPaths.tests_dir, "755"),
+            (EnvironmentPaths.solution_dir, "755"),
         )
         strategy = getattr(self, "_strategy", None)
-        for path in paths:
+        for path, mode in paths:
             path_str = str(path)
             if strategy is not None and await strategy.is_dir(path_str):
                 continue
             try:
-                await self._sandbox.fs.create_folder(path_str, "777")
-                await self._sandbox.fs.set_file_permissions(path_str, mode="777")
+                await self._sandbox.fs.create_folder(path_str, mode)
+                await self._sandbox.fs.set_file_permissions(path_str, mode=mode)
             except Exception:
                 if strategy is None or not await strategy.is_dir(path_str):
                     raise
@@ -1108,12 +1111,27 @@ class DaytonaEnvironment(BaseEnvironment):
         *,
         runtime_user: str | int | None,
     ) -> Image:
-        commands = [
-            "USER root",
-            "RUN mkdir -p /logs /logs/agent /logs/verifier /logs/artifacts "
-            "/tests /solution && chmod -R 777 /logs /tests /solution",
-        ]
-        if restore_user := self._non_root_user(runtime_user):
+        # /logs/* are written by both the agent and the verifier as their
+        # (possibly non-root) run users, so they are world-writable. /solution
+        # (the oracle solution) and /tests (the verifier's tests, uploaded
+        # AFTER the agent runs) must be readable by the run user but not
+        # writable by the agent, so they are owned by the run user with 0755
+        # rather than world-writable -- matching the root-owned, non-world-
+        # writable posture the Docker/E2B/Modal backends already give these
+        # paths. On Daytona *direct* mode a non-root image exposes a single
+        # usable identity shared by the agent and the verifier upload, so 0755
+        # is the strongest isolation achievable there; it still removes world
+        # (and group) write, keeping every other account and the common
+        # root-image case fully protected.
+        restore_user = self._non_root_user(runtime_user)
+        setup = (
+            "mkdir -p /logs /logs/agent /logs/verifier /logs/artifacts "
+            "/tests /solution && chmod -R 0777 /logs && chmod 0755 /tests /solution"
+        )
+        if restore_user:
+            setup += f" && chown {restore_user} /tests /solution"
+        commands = ["USER root", f"RUN {setup}"]
+        if restore_user:
             commands.append(f"USER {restore_user}")
         return image.dockerfile_commands(commands)
 

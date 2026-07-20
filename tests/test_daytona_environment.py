@@ -388,11 +388,32 @@ def test_daytona_directory_layer_restores_dockerfile_user(tmp_path):
 
     dockerfile = image.dockerfile()
     assert "USER root" in dockerfile
+    # /logs/* is world-writable; /tests and /solution are 0755 owned by the
+    # restored run user so the agent cannot tamper with them (anti-cheat).
     assert (
         "RUN mkdir -p /logs /logs/agent /logs/verifier /logs/artifacts "
-        "/tests /solution && chmod -R 777 /logs /tests /solution"
+        "/tests /solution && chmod -R 0777 /logs && chmod 0755 /tests /solution "
+        "&& chown user /tests /solution"
     ) in dockerfile
+    assert "chmod -R 777 /logs /tests /solution" not in dockerfile
     assert dockerfile.rstrip().endswith("USER user")
+
+
+def test_daytona_directory_layer_root_image_no_chown(tmp_path):
+    # A root-default image gets no USER-restore and no chown: /tests and
+    # /solution stay root-owned 0755 (agent runs as root anyway), never 777.
+    env = _make_env(tmp_path)
+    env._dockerfile_path.write_text("FROM alpine\n")
+
+    image = env._with_daytona_directory_layer(
+        daytona.Image.from_dockerfile(env._dockerfile_path),
+        runtime_user=env._dockerfile_runtime_user(),
+    )
+
+    dockerfile = image.dockerfile()
+    assert "chmod 0755 /tests /solution" in dockerfile
+    assert "chown" not in dockerfile
+    assert "chmod -R 777 /logs /tests /solution" not in dockerfile
 
 
 def test_provision_directories_skips_existing_directories(tmp_path):
