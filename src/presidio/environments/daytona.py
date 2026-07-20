@@ -391,11 +391,7 @@ class _DaytonaDirect(_DaytonaStrategy):
             )
             image = env._with_daytona_directory_layer(
                 image,
-                runtime_user=(
-                    env._resolve_user(None)
-                    if hasattr(env, "default_user")
-                    else None
-                ),
+                runtime_user=env._resolve_user(None),
             )
             kwargs = {
                 "image": image,
@@ -940,6 +936,7 @@ class DaytonaEnvironment(BaseEnvironment):
         self._sandbox: AsyncSandbox | None = None
         self._daytona_effective_user_cache: tuple[int | None, str] | None = None
         self._daytona_effective_user_lock = asyncio.Lock()
+        self._daytona_su_warned: set[str] = set()
         self._keepalive_task: asyncio.Task[None] | None = None
         self._client_manager: DaytonaClientManager | None = None
         self._resolved_network_allow_list: str | None = None
@@ -1032,16 +1029,15 @@ class DaytonaEnvironment(BaseEnvironment):
             (EnvironmentPaths.tests_dir, "755"),
             (EnvironmentPaths.solution_dir, "755"),
         )
-        strategy = getattr(self, "_strategy", None)
         for path, mode in paths:
             path_str = str(path)
-            if strategy is not None and await strategy.is_dir(path_str):
+            if await self._strategy.is_dir(path_str):
                 continue
             try:
                 await self._sandbox.fs.create_folder(path_str, mode)
                 await self._sandbox.fs.set_file_permissions(path_str, mode=mode)
             except Exception:
-                if strategy is None or not await strategy.is_dir(path_str):
+                if not await self._strategy.is_dir(path_str):
                     raise
 
     @property
@@ -1638,12 +1634,15 @@ class DaytonaEnvironment(BaseEnvironment):
         if self._daytona_user_matches(effective_user, user):
             return None
 
-        self.logger.warning(
-            "Daytona direct sandbox runs as non-root user %r; executing command "
-            "requested as %r without runtime privilege escalation",
-            effective_name or effective_uid,
-            user,
-        )
+        warn_key = str(user)
+        if warn_key not in self._daytona_su_warned:
+            self._daytona_su_warned.add(warn_key)
+            self.logger.warning(
+                "Daytona direct sandbox runs as non-root user %r; executing "
+                "commands requested as %r without runtime privilege escalation",
+                effective_name or effective_uid,
+                user,
+            )
         return None
 
     @retry(

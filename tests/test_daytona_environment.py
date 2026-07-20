@@ -467,8 +467,14 @@ def test_daytona_non_root_toolbox_skips_su_for_different_user(
 
     monkeypatch.setattr(env, "_get_daytona_effective_user", effective_user)
 
-    assert asyncio.run(env._daytona_su_target("root")) is None
-    assert "without runtime privilege escalation" in caplog.text
+    with caplog.at_level(logging.WARNING):
+        assert asyncio.run(env._daytona_su_target("root")) is None
+        assert asyncio.run(env._daytona_su_target("root")) is None
+    # The warning is deduped per distinct target user (pure noise if repeated).
+    warnings = [
+        r for r in caplog.records if "without runtime privilege escalation" in r.message
+    ]
+    assert len(warnings) == 1
 
 
 # --- sandbox keepalive (defeat auto-stop for long, active phases) -----------

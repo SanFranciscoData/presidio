@@ -210,6 +210,7 @@ def test_daytona_compose_reset_keeps_root_user():
 
 def test_daytona_direct_provisions_canonical_directories():
     env = DaytonaEnvironment.__new__(DaytonaEnvironment)
+    env._strategy = type("Strategy", (), {"is_dir": AsyncMock(return_value=False)})()
     create_folder = AsyncMock()
     set_file_permissions = AsyncMock()
     env._sandbox = type(
@@ -251,6 +252,7 @@ def test_daytona_direct_provisions_canonical_directories():
 
 def test_daytona_direct_directory_provisioning_fails_closed():
     env = DaytonaEnvironment.__new__(DaytonaEnvironment)
+    env._strategy = type("Strategy", (), {"is_dir": AsyncMock(return_value=False)})()
     create_folder = AsyncMock(side_effect=RuntimeError("permission denied"))
     env._sandbox = type(
         "Sandbox",
@@ -273,6 +275,7 @@ def test_daytona_direct_directory_provisioning_fails_closed():
 
 def test_daytona_direct_start_uses_toolbox_directory_provisioning(monkeypatch):
     env = DaytonaEnvironment.__new__(DaytonaEnvironment)
+    env.default_user = None
     env._snapshot_template_name = None
     env._auto_delete_interval = 0
     env._auto_stop_interval = 0
