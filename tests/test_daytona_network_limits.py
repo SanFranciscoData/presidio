@@ -210,6 +210,7 @@ def test_daytona_compose_reset_keeps_root_user():
 
 def test_daytona_direct_provisions_canonical_directories():
     env = DaytonaEnvironment.__new__(DaytonaEnvironment)
+    env._strategy = type("Strategy", (), {"is_dir": AsyncMock(return_value=False)})()
     create_folder = AsyncMock()
     set_file_permissions = AsyncMock()
     env._sandbox = type(
@@ -229,26 +230,29 @@ def test_daytona_direct_provisions_canonical_directories():
 
     asyncio.run(env._provision_directories())
 
+    # /logs/* world-writable; /tests and /solution 0755 (anti-cheat: the agent
+    # must not be able to overwrite the verifier tests or oracle solution).
     assert create_folder.await_args_list == [
         call(str(EnvironmentPaths.logs_dir), "777"),
         call(str(EnvironmentPaths.agent_dir), "777"),
         call(str(EnvironmentPaths.verifier_dir), "777"),
         call(str(EnvironmentPaths.artifacts_dir), "777"),
-        call(str(EnvironmentPaths.tests_dir), "777"),
-        call(str(EnvironmentPaths.solution_dir), "777"),
+        call(str(EnvironmentPaths.tests_dir), "755"),
+        call(str(EnvironmentPaths.solution_dir), "755"),
     ]
     assert set_file_permissions.await_args_list == [
         call(str(EnvironmentPaths.logs_dir), mode="777"),
         call(str(EnvironmentPaths.agent_dir), mode="777"),
         call(str(EnvironmentPaths.verifier_dir), mode="777"),
         call(str(EnvironmentPaths.artifacts_dir), mode="777"),
-        call(str(EnvironmentPaths.tests_dir), mode="777"),
-        call(str(EnvironmentPaths.solution_dir), mode="777"),
+        call(str(EnvironmentPaths.tests_dir), mode="755"),
+        call(str(EnvironmentPaths.solution_dir), mode="755"),
     ]
 
 
 def test_daytona_direct_directory_provisioning_fails_closed():
     env = DaytonaEnvironment.__new__(DaytonaEnvironment)
+    env._strategy = type("Strategy", (), {"is_dir": AsyncMock(return_value=False)})()
     create_folder = AsyncMock(side_effect=RuntimeError("permission denied"))
     env._sandbox = type(
         "Sandbox",
@@ -271,6 +275,7 @@ def test_daytona_direct_directory_provisioning_fails_closed():
 
 def test_daytona_direct_start_uses_toolbox_directory_provisioning(monkeypatch):
     env = DaytonaEnvironment.__new__(DaytonaEnvironment)
+    env.default_user = None
     env._snapshot_template_name = None
     env._auto_delete_interval = 0
     env._auto_stop_interval = 0

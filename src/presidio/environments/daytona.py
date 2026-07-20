@@ -6,9 +6,11 @@ import email.utils
 import ipaddress
 import os
 import random
+import re
 import shlex
 import socket
 import tempfile
+import time
 from abc import abstractmethod
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
@@ -90,6 +92,8 @@ DAYTONA_KEEPALIVE_MIN_INTERVAL_SEC = 60.0
 DAYTONA_CREATE_MAX_ATTEMPTS = 2
 DAYTONA_RATE_LIMIT_MAX_ATTEMPTS = 5
 DAYTONA_RATE_LIMIT_MAX_DELAY_SEC = 120.0
+DAYTONA_SESSION_COMMAND_GRACE_SEC = 60.0
+DAYTONA_SESSION_COMMAND_DEFAULT_TIMEOUT_SEC = 300.0
 
 
 def _mb_to_gib_ceil(mb: int) -> int:
@@ -369,7 +373,9 @@ class _DaytonaDirect(_DaytonaStrategy):
                 **env._base_sandbox_params(),
             )
         elif force_build or not env.task_env_config.docker_image:
+            runtime_user = env._dockerfile_runtime_user()
             image = env._with_agent_install(Image.from_dockerfile(env._dockerfile_path))
+            image = env._with_daytona_directory_layer(image, runtime_user=runtime_user)
             kwargs = {
                 "image": image,
                 **env._base_sandbox_params(),
@@ -382,6 +388,10 @@ class _DaytonaDirect(_DaytonaStrategy):
         else:
             image = env._with_agent_install(
                 Image.base(env.task_env_config.docker_image)
+            )
+            image = env._with_daytona_directory_layer(
+                image,
+                runtime_user=env._resolve_user(None),
             )
             kwargs = {
                 "image": image,
@@ -924,6 +934,9 @@ class DaytonaEnvironment(BaseEnvironment):
         }
         self._snapshot_template_name = snapshot_template_name
         self._sandbox: AsyncSandbox | None = None
+        self._daytona_effective_user_cache: tuple[int | None, str] | None = None
+        self._daytona_effective_user_lock = asyncio.Lock()
+        self._daytona_su_warned: set[str] = set()
         self._keepalive_task: asyncio.Task[None] | None = None
         self._client_manager: DaytonaClientManager | None = None
         self._resolved_network_allow_list: str | None = None
@@ -1005,17 +1018,27 @@ class DaytonaEnvironment(BaseEnvironment):
         if not self._sandbox:
             raise RuntimeError("Sandbox not found. Please build the environment first.")
 
+        # /logs/* are world-writable (agent + verifier log writes); /tests and
+        # /solution are 0755 so the agent cannot tamper with the verifier's
+        # tests or the oracle solution (see _with_daytona_directory_layer).
         paths = (
-            EnvironmentPaths.logs_dir,
-            EnvironmentPaths.agent_dir,
-            EnvironmentPaths.verifier_dir,
-            EnvironmentPaths.artifacts_dir,
-            EnvironmentPaths.tests_dir,
-            EnvironmentPaths.solution_dir,
+            (EnvironmentPaths.logs_dir, "777"),
+            (EnvironmentPaths.agent_dir, "777"),
+            (EnvironmentPaths.verifier_dir, "777"),
+            (EnvironmentPaths.artifacts_dir, "777"),
+            (EnvironmentPaths.tests_dir, "755"),
+            (EnvironmentPaths.solution_dir, "755"),
         )
-        for path in paths:
-            await self._sandbox.fs.create_folder(str(path), "777")
-            await self._sandbox.fs.set_file_permissions(str(path), mode="777")
+        for path, mode in paths:
+            path_str = str(path)
+            if await self._strategy.is_dir(path_str):
+                continue
+            try:
+                await self._sandbox.fs.create_folder(path_str, mode)
+                await self._sandbox.fs.set_file_permissions(path_str, mode=mode)
+            except Exception:
+                if not await self._strategy.is_dir(path_str):
+                    raise
 
     @property
     def capabilities(self) -> EnvironmentCapabilities:
@@ -1058,6 +1081,54 @@ class DaytonaEnvironment(BaseEnvironment):
             install,
             user=self._resolve_user(None),
         )
+        return image.dockerfile_commands(commands)
+
+    def _dockerfile_runtime_user(self) -> str | None:
+        runtime_user = None
+        for line in self._dockerfile_path.read_text().splitlines():
+            line_without_comment = line.split("#", 1)[0].strip()
+            match = re.match(r"(?i)^USER\s+(.+?)\s*$", line_without_comment)
+            if match:
+                runtime_user = match.group(1)
+        return runtime_user
+
+    @staticmethod
+    def _non_root_user(user: str | int | None) -> str | None:
+        if user is None:
+            return None
+        value = str(user).strip()
+        if not value or value.lower() == "root" or value == "0":
+            return None
+        return value
+
+    def _with_daytona_directory_layer(
+        self,
+        image: Image,
+        *,
+        runtime_user: str | int | None,
+    ) -> Image:
+        # /logs/* are written by both the agent and the verifier as their
+        # (possibly non-root) run users, so they are world-writable. /solution
+        # (the oracle solution) and /tests (the verifier's tests, uploaded
+        # AFTER the agent runs) must be readable by the run user but not
+        # writable by the agent, so they are owned by the run user with 0755
+        # rather than world-writable -- matching the root-owned, non-world-
+        # writable posture the Docker/E2B/Modal backends already give these
+        # paths. On Daytona *direct* mode a non-root image exposes a single
+        # usable identity shared by the agent and the verifier upload, so 0755
+        # is the strongest isolation achievable there; it still removes world
+        # (and group) write, keeping every other account and the common
+        # root-image case fully protected.
+        restore_user = self._non_root_user(runtime_user)
+        setup = (
+            "mkdir -p /logs /logs/agent /logs/verifier /logs/artifacts "
+            "/tests /solution && chmod -R 0777 /logs && chmod 0755 /tests /solution"
+        )
+        if restore_user:
+            setup += f" && chown {restore_user} /tests /solution"
+        commands = ["USER root", f"RUN {setup}"]
+        if restore_user:
+            commands.append(f"USER {restore_user}")
         return image.dockerfile_commands(commands)
 
     def _network_params(self) -> dict[str, Any]:
@@ -1293,6 +1364,7 @@ class DaytonaEnvironment(BaseEnvironment):
         )
         try:
             self._sandbox = await asyncio.shield(create_task)
+            self._daytona_effective_user_cache = None
             self._start_keepalive()
         except asyncio.CancelledError:
             try:
@@ -1395,17 +1467,55 @@ class DaytonaEnvironment(BaseEnvironment):
             command_id,
         )
 
-    async def _poll_response(self, session_id: str, command_id: str) -> ExecResult:
+    @staticmethod
+    def _session_command_poll_timeout(timeout_sec: int | None) -> float:
+        if timeout_sec is None:
+            return DAYTONA_SESSION_COMMAND_DEFAULT_TIMEOUT_SEC
+        return timeout_sec + DAYTONA_SESSION_COMMAND_GRACE_SEC
+
+    async def _poll_response(
+        self,
+        session_id: str,
+        command_id: str,
+        *,
+        timeout_sec: int | None = None,
+        command: str = "",
+    ) -> ExecResult:
         if not self._sandbox:
             raise RuntimeError("Sandbox not found. Please build the environment first.")
 
-        response = await self._get_session_command_with_retry(session_id, command_id)
-        while response.exit_code is None:
-            await asyncio.sleep(1)
-            response = await self._get_session_command_with_retry(
-                session_id,
-                response.id,
+        poll_timeout_sec = self._session_command_poll_timeout(timeout_sec)
+        deadline = time.monotonic() + poll_timeout_sec
+
+        def _timed_out() -> TimeoutError:
+            return TimeoutError(
+                "Daytona session command polling timed out "
+                f"(session_id={session_id}, command_id={command_id}, "
+                f"command={command!r})"
             )
+
+        async def get_response(current_command_id: str):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _timed_out()
+            try:
+                return await asyncio.wait_for(
+                    self._get_session_command_with_retry(
+                        session_id,
+                        current_command_id,
+                    ),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError as e:
+                raise _timed_out() from e
+
+        response = await get_response(command_id)
+        while response.exit_code is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _timed_out()
+            await asyncio.sleep(min(1, remaining))
+            response = await get_response(response.id)
 
         logs = await self._get_session_command_logs_with_retry(session_id, command_id)
         return ExecResult(
@@ -1426,6 +1536,7 @@ class DaytonaEnvironment(BaseEnvironment):
         if not self._sandbox:
             raise RuntimeError("Sandbox not found. Please build the environment first.")
 
+        original_command = command
         session_id = str(uuid4())
         await self._sandbox.process.create_session(session_id)
 
@@ -1439,7 +1550,8 @@ class DaytonaEnvironment(BaseEnvironment):
             command = f"timeout {timeout_sec} {command}"
         if cwd:
             command = f"cd {shlex.quote(cwd)} && {command}"
-        if user is not None:
+        su_target = await self._daytona_su_target(user)
+        if su_target is not None:
             if isinstance(user, int):
                 user_arg = f"$(getent passwd {user} | cut -d: -f1)"
             else:
@@ -1453,7 +1565,85 @@ class DaytonaEnvironment(BaseEnvironment):
         )
         if response.cmd_id is None:
             raise RuntimeError("Cannot find command ID.")
-        return await self._poll_response(session_id, response.cmd_id)
+        return await self._poll_response(
+            session_id,
+            response.cmd_id,
+            timeout_sec=timeout_sec,
+            command=original_command,
+        )
+
+    async def _get_daytona_effective_user(self) -> tuple[int | None, str]:
+        if self._daytona_effective_user_cache is not None:
+            return self._daytona_effective_user_cache
+
+        async with self._daytona_effective_user_lock:
+            if self._daytona_effective_user_cache is not None:
+                return self._daytona_effective_user_cache
+            if not self._sandbox:
+                raise RuntimeError(
+                    "Sandbox not found. Please build the environment first."
+                )
+
+            session_id = str(uuid4())
+            await self._sandbox.process.create_session(session_id)
+            response = await self._sandbox.process.execute_session_command(
+                session_id,
+                SessionExecuteRequest(
+                    command="id -u; id -un",
+                    run_async=True,
+                ),
+                timeout=10,
+            )
+            if response.cmd_id is None:
+                raise RuntimeError("Cannot find command ID.")
+            result = await self._poll_response(
+                session_id,
+                response.cmd_id,
+                timeout_sec=10,
+                command="id -u; id -un",
+            )
+            lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            uid: int | None = None
+            if lines and lines[0].isdigit():
+                uid = int(lines[0])
+            username = lines[-1] if lines else ""
+            self._daytona_effective_user_cache = (uid, username)
+            return self._daytona_effective_user_cache
+
+    @staticmethod
+    def _daytona_user_matches(
+        effective_user: tuple[int | None, str],
+        target_user: str | int,
+    ) -> bool:
+        effective_uid, effective_name = effective_user
+        if isinstance(target_user, int):
+            return effective_uid == target_user
+        target = str(target_user)
+        if target.isdigit():
+            return effective_uid == int(target)
+        return target == effective_name
+
+    async def _daytona_su_target(self, user: str | int | None) -> str | int | None:
+        if user is None or self._compose_mode:
+            return user
+
+        effective_user = await self._get_daytona_effective_user()
+        effective_uid, effective_name = effective_user
+        if effective_uid == 0 or effective_name == "root":
+            return user
+        if self._daytona_user_matches(effective_user, user):
+            return None
+
+        warn_key = str(user)
+        if warn_key not in self._daytona_su_warned:
+            self._daytona_su_warned.add(warn_key)
+            self.logger.warning(
+                "Daytona direct sandbox runs as non-root user %r; executing "
+                "commands requested as %r without runtime privilege escalation",
+                effective_name or effective_uid,
+                user,
+            )
+        return None
 
     @retry(
         stop=stop_after_attempt(2),

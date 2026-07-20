@@ -137,6 +137,18 @@ class Verifier:
         task_os = self._task.config.environment.os
         test_source_dirs, tests_source_dir, host_test_path = self._resolve_tests()
 
+        # Anti-cheat: in shared-verifier mode the agent ran in this same
+        # container, so wipe anything it may have left behind before grading.
+        # Empty the verifier reward dir so a pre-planted reward file is never
+        # trusted -- the task's test script always recomputes the reward. When
+        # this verifier uploads the tests (shared mode), also empty /tests
+        # first so only the verifier's tests are present, preserving its
+        # non-world-writable mode (chmod=False). Separate-verifier envs are
+        # freshly built, so these are no-op safeguards there.
+        await self._environment.empty_dirs([env_paths.verifier_dir], chmod=True)
+        if not self._skip_tests_upload:
+            await self._environment.empty_dirs([env_paths.tests_dir], chmod=False)
+
         if not self._skip_tests_upload:
             try:
                 for source_dir in test_source_dirs:

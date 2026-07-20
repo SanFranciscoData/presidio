@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import types
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
@@ -12,12 +13,14 @@ from pathlib import Path
 
 import pytest
 
+import presidio.environments.daytona as daytona_environment
 from presidio.environments.daytona import (
     DAYTONA_DEFAULT_AUTO_DELETE_INTERVAL_MINS,
     DAYTONA_DEFAULT_AUTO_STOP_INTERVAL_MINS,
     DAYTONA_KEEPALIVE_MIN_INTERVAL_SEC,
     DAYTONA_OWNER_LABEL,
     DAYTONA_RATE_LIMIT_MAX_ATTEMPTS,
+    DAYTONA_SESSION_COMMAND_GRACE_SEC,
     DaytonaEnvironment,
     _mb_to_gib_ceil,
     _retry_after_seconds,
@@ -299,6 +302,179 @@ def test_cleanup_orphans_deletes_only_owned_sandboxes(tmp_path):
 
     assert deleted == ["orphan-1", "orphan-2"]
     assert listed_labels == [{DAYTONA_OWNER_LABEL: env._owner_token}]
+
+
+# --- session command polling ------------------------------------------------
+
+
+def test_session_command_poll_timeout_is_bounded(tmp_path, monkeypatch):
+    env = _make_env(tmp_path)
+    env._sandbox = types.SimpleNamespace()
+    monkeypatch.setattr(
+        daytona_environment,
+        "DAYTONA_SESSION_COMMAND_DEFAULT_TIMEOUT_SEC",
+        0.01,
+    )
+
+    async def get_response(session_id, command_id):
+        return types.SimpleNamespace(exit_code=None, id=command_id)
+
+    env._get_session_command_with_retry = get_response  # type: ignore[method-assign]
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match="session_id=session-1"):
+        asyncio.run(
+            env._poll_response(
+                "session-1",
+                "command-1",
+                command="mkdir -p /logs",
+            )
+        )
+    assert time.monotonic() - started < 1
+
+
+def test_session_command_poll_returns_terminal_response(tmp_path, monkeypatch):
+    env = _make_env(tmp_path)
+    env._sandbox = types.SimpleNamespace()
+    responses = iter(
+        [
+            types.SimpleNamespace(exit_code=None, id="command-1"),
+            types.SimpleNamespace(exit_code=0, id="command-1"),
+        ]
+    )
+    logs = types.SimpleNamespace(stdout="out", stderr="err")
+
+    async def get_response(session_id, command_id):
+        return next(responses)
+
+    async def get_logs(session_id, command_id):
+        return logs
+
+    async def fake_sleep(delay):
+        assert delay <= 1
+
+    env._get_session_command_with_retry = get_response  # type: ignore[method-assign]
+    env._get_session_command_logs_with_retry = get_logs  # type: ignore[method-assign]
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    result = asyncio.run(
+        env._poll_response(
+            "session-1",
+            "command-1",
+            timeout_sec=30,
+            command="mkdir -p /logs",
+        )
+    )
+
+    assert result.stdout == "out"
+    assert result.stderr == "err"
+    assert result.return_code == 0
+
+
+def test_explicit_session_timeout_includes_grace():
+    assert (
+        DaytonaEnvironment._session_command_poll_timeout(600)
+        == 600 + DAYTONA_SESSION_COMMAND_GRACE_SEC
+    )
+
+
+def test_daytona_directory_layer_restores_dockerfile_user(tmp_path):
+    env = _make_env(tmp_path)
+    env._dockerfile_path.write_text("FROM alpine\nUSER user\n")
+
+    image = env._with_daytona_directory_layer(
+        daytona.Image.from_dockerfile(env._dockerfile_path),
+        runtime_user=env._dockerfile_runtime_user(),
+    )
+
+    dockerfile = image.dockerfile()
+    assert "USER root" in dockerfile
+    # /logs/* is world-writable; /tests and /solution are 0755 owned by the
+    # restored run user so the agent cannot tamper with them (anti-cheat).
+    assert (
+        "RUN mkdir -p /logs /logs/agent /logs/verifier /logs/artifacts "
+        "/tests /solution && chmod -R 0777 /logs && chmod 0755 /tests /solution "
+        "&& chown user /tests /solution"
+    ) in dockerfile
+    assert "chmod -R 777 /logs /tests /solution" not in dockerfile
+    assert dockerfile.rstrip().endswith("USER user")
+
+
+def test_daytona_directory_layer_root_image_no_chown(tmp_path):
+    # A root-default image gets no USER-restore and no chown: /tests and
+    # /solution stay root-owned 0755 (agent runs as root anyway), never 777.
+    env = _make_env(tmp_path)
+    env._dockerfile_path.write_text("FROM alpine\n")
+
+    image = env._with_daytona_directory_layer(
+        daytona.Image.from_dockerfile(env._dockerfile_path),
+        runtime_user=env._dockerfile_runtime_user(),
+    )
+
+    dockerfile = image.dockerfile()
+    assert "chmod 0755 /tests /solution" in dockerfile
+    assert "chown" not in dockerfile
+    assert "chmod -R 777 /logs /tests /solution" not in dockerfile
+
+
+def test_provision_directories_skips_existing_directories(tmp_path):
+    env = _make_env(tmp_path)
+    env._sandbox = types.SimpleNamespace(fs=types.SimpleNamespace())
+    calls: list[str] = []
+
+    async def is_dir(path, user=None):
+        calls.append(path)
+        return True
+
+    env._strategy.is_dir = is_dir  # type: ignore[method-assign]
+
+    asyncio.run(env._provision_directories())
+
+    assert len(calls) == 6
+
+
+def test_daytona_root_toolbox_keeps_su_wrapper(tmp_path, monkeypatch):
+    env = _make_env(tmp_path)
+
+    async def effective_user():
+        return (0, "root")
+
+    monkeypatch.setattr(env, "_get_daytona_effective_user", effective_user)
+
+    assert asyncio.run(env._daytona_su_target("user")) == "user"
+
+
+def test_daytona_non_root_toolbox_skips_su_for_same_user(tmp_path, monkeypatch):
+    env = _make_env(tmp_path)
+
+    async def effective_user():
+        return (1000, "user")
+
+    monkeypatch.setattr(env, "_get_daytona_effective_user", effective_user)
+
+    assert asyncio.run(env._daytona_su_target("user")) is None
+    assert asyncio.run(env._daytona_su_target(1000)) is None
+
+
+def test_daytona_non_root_toolbox_skips_su_for_different_user(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    env = _make_env(tmp_path)
+
+    async def effective_user():
+        return (1000, "user")
+
+    monkeypatch.setattr(env, "_get_daytona_effective_user", effective_user)
+
+    with caplog.at_level(logging.WARNING):
+        assert asyncio.run(env._daytona_su_target("root")) is None
+        assert asyncio.run(env._daytona_su_target("root")) is None
+    # The warning is deduped per distinct target user (pure noise if repeated).
+    warnings = [
+        r for r in caplog.records if "without runtime privilege escalation" in r.message
+    ]
+    assert len(warnings) == 1
 
 
 # --- sandbox keepalive (defeat auto-stop for long, active phases) -----------
