@@ -195,6 +195,59 @@ class TestVerifierArtifactUpload:
             verifier_env.upload_file.assert_not_awaited()
 
     @run_async
+    async def test_shared_verifier_cleans_tests_and_reward_before_grading(self):
+        """Anti-cheat: the shared verifier wipes agent-plantable state before
+        grading -- the reward dir (never trust a pre-existing reward) and the
+        tests dir (only the verifier's tests are present), preserving /tests'
+        non-world-writable mode via chmod=False."""
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = _task_with_configured_artifacts(Path(tmp), separate=False)
+            trials_dir = Path(tmp) / "trials"
+            trials_dir.mkdir()
+            agent_env = _make_env(mounted=True)
+            verifier_env = _make_env(mounted=False)
+
+            events: list[tuple] = []
+
+            async def empty_dirs(dirs, *, chmod=True):
+                events.append(("empty_dirs", tuple(str(d) for d in dirs), chmod))
+
+            async def upload_dir(source_dir, target_dir):
+                events.append(("upload_dir", target_dir))
+
+            async def exec_(command, **kwargs):
+                events.append(("exec", command))
+                return ExecResult(stdout="/", stderr="", return_code=0)
+
+            agent_env.empty_dirs.side_effect = empty_dirs
+            agent_env.upload_dir.side_effect = upload_dir
+            agent_env.exec.side_effect = exec_
+
+            await _run(task_dir, trials_dir, agent_env, verifier_env)
+
+            paths = EnvironmentPaths()
+            empties = [e for e in events if e[0] == "empty_dirs"]
+            assert ((str(paths.verifier_dir),), True) in [
+                (e[1], e[2]) for e in empties
+            ], empties
+            assert ((str(paths.tests_dir),), False) in [
+                (e[1], e[2]) for e in empties
+            ], empties
+
+            # /tests is emptied before the verifier uploads its tests into it.
+            tests_empty_idx = next(
+                i
+                for i, e in enumerate(events)
+                if e[0] == "empty_dirs" and e[1] == (str(paths.tests_dir),)
+            )
+            tests_upload_idx = next(
+                i
+                for i, e in enumerate(events)
+                if e[0] == "upload_dir" and e[1] == str(paths.tests_dir)
+            )
+            assert tests_empty_idx < tests_upload_idx, events
+
+    @run_async
     async def test_separate_verifier_uploads_implicit_and_configured_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             task_dir = _task_with_configured_artifacts(Path(tmp))
