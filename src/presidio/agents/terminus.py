@@ -383,17 +383,44 @@ class _BaseTerminusAgent(BaseAgent):
         usage = response.get("usage")
         if not isinstance(usage, dict):
             return None
-        prompt_tokens = cls._optional_int(usage.get("prompt_tokens"))
-        completion_tokens = cls._optional_int(usage.get("completion_tokens"))
-        if prompt_tokens is None:
-            prompt_tokens = cls._optional_int(usage.get("input_tokens"))
-        if completion_tokens is None:
+        cached_tokens = None
+        if "prompt_tokens" in usage or "completion_tokens" in usage:
+            prompt_tokens = cls._optional_int(usage.get("prompt_tokens"))
+            completion_tokens = cls._optional_int(usage.get("completion_tokens"))
+            prompt_details = usage.get("prompt_tokens_details")
+            if isinstance(prompt_details, dict):
+                cached_tokens = cls._optional_int(prompt_details.get("cached_tokens"))
+        else:
+            input_tokens = cls._optional_int(usage.get("input_tokens"))
+            cache_creation_tokens = cls._optional_int(
+                usage.get("cache_creation_input_tokens")
+            )
+            cache_read_tokens = cls._optional_int(
+                usage.get("cache_read_input_tokens")
+            )
+            if (
+                input_tokens is None
+                and cache_creation_tokens is None
+                and cache_read_tokens is None
+            ):
+                prompt_tokens = None
+            else:
+                prompt_tokens = sum(
+                    value or 0
+                    for value in (
+                        input_tokens,
+                        cache_creation_tokens,
+                        cache_read_tokens,
+                    )
+                )
             completion_tokens = cls._optional_int(usage.get("output_tokens"))
+            cached_tokens = cache_read_tokens
         if prompt_tokens is None and completion_tokens is None:
             return None
         return Metrics(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            cached_tokens=cached_tokens,
         )
 
     @staticmethod
