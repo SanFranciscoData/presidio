@@ -1753,7 +1753,7 @@ class DaytonaEnvironment(BaseEnvironment):
     ) -> ExecResult:
         user = self._resolve_user(user)
         env = self._merge_env(env)
-        effective_cwd = cwd or self.task_env_config.workdir
+        effective_cwd = cwd or self.task_env_config.workdir or "/"
         return await self._strategy.exec(
             command,
             cwd=effective_cwd,

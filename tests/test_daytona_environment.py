@@ -433,6 +433,53 @@ def test_provision_directories_skips_existing_directories(tmp_path):
     assert len(calls) == 6
 
 
+def test_daytona_exec_defaults_cwd_to_filesystem_root(tmp_path):
+    env = _make_env(tmp_path)
+    calls: list[dict] = []
+
+    async def fake_exec(*args, **kwargs):
+        calls.append(kwargs)
+        return None
+
+    env._strategy.exec = fake_exec  # type: ignore[method-assign]
+
+    asyncio.run(env.exec("pwd"))
+
+    assert calls[0]["cwd"] == "/"
+
+
+def test_daytona_exec_prefers_explicit_cwd(tmp_path):
+    env = _make_env(tmp_path)
+    env.task_env_config = EnvironmentConfig(workdir="/task")
+    calls: list[dict] = []
+
+    async def fake_exec(*args, **kwargs):
+        calls.append(kwargs)
+        return None
+
+    env._strategy.exec = fake_exec  # type: ignore[method-assign]
+
+    asyncio.run(env.exec("pwd", cwd="/explicit"))
+
+    assert calls[0]["cwd"] == "/explicit"
+
+
+def test_daytona_exec_uses_task_workdir(tmp_path):
+    env = _make_env(tmp_path)
+    env.task_env_config = EnvironmentConfig(workdir="/task")
+    calls: list[dict] = []
+
+    async def fake_exec(*args, **kwargs):
+        calls.append(kwargs)
+        return None
+
+    env._strategy.exec = fake_exec  # type: ignore[method-assign]
+
+    asyncio.run(env.exec("pwd"))
+
+    assert calls[0]["cwd"] == "/task"
+
+
 @pytest.mark.parametrize("method_name", ["is_dir", "is_file"])
 def test_daytona_direct_missing_path_is_not_found(tmp_path, method_name):
     env = _make_env(tmp_path)
