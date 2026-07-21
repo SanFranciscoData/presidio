@@ -22,6 +22,7 @@ from presidio.environments.daytona import (
     DAYTONA_RATE_LIMIT_MAX_ATTEMPTS,
     DAYTONA_SESSION_COMMAND_GRACE_SEC,
     DaytonaEnvironment,
+    _DaytonaDirect,
     _mb_to_gib_ceil,
     _retry_after_seconds,
 )
@@ -29,7 +30,7 @@ from presidio.models.task.config import EnvironmentConfig
 from presidio.models.trial.paths import TrialPaths
 
 daytona = pytest.importorskip("daytona")
-from daytona import DaytonaRateLimitError  # noqa: E402
+from daytona import DaytonaNotFoundError, DaytonaRateLimitError  # noqa: E402
 
 
 def _make_env(tmp_path: Path, **kwargs) -> DaytonaEnvironment:
@@ -430,6 +431,21 @@ def test_provision_directories_skips_existing_directories(tmp_path):
     asyncio.run(env._provision_directories())
 
     assert len(calls) == 6
+
+
+@pytest.mark.parametrize("method_name", ["is_dir", "is_file"])
+def test_daytona_direct_missing_path_is_not_found(tmp_path, method_name):
+    env = _make_env(tmp_path)
+    strategy = _DaytonaDirect(env)
+
+    async def get_file_info(path):
+        raise DaytonaNotFoundError("missing path")
+
+    env._sandbox = types.SimpleNamespace(
+        fs=types.SimpleNamespace(get_file_info=get_file_info)
+    )
+
+    assert asyncio.run(getattr(strategy, method_name)("/missing")) is False
 
 
 def test_daytona_root_toolbox_keeps_su_wrapper(tmp_path, monkeypatch):
