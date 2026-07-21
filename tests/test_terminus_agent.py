@@ -29,6 +29,13 @@ def test_find_new_content():
     assert session._find_new_content("unrelated") is None
 
 
-def test_agent_names():
+def test_agent_names_and_install_spec(tmp_path):
     assert TerminusAgent.name() == "terminus"
     assert Terminus2Agent.name() == "terminus-2"
+
+    spec = TerminusAgent(
+        logs_dir=tmp_path,
+        model_name="anthropic/x",
+    ).install_spec()
+    assert spec.agent_name == "terminus"
+    assert "tmux" in spec.steps[0].run

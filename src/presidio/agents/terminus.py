@@ -10,6 +10,7 @@ from typing import Any
 from presidio.agents.base import BaseAgent
 from presidio.environments.base import BaseEnvironment
 from presidio.models.agent.context import AgentContext
+from presidio.models.agent.install import AgentInstallSpec, InstallStep
 from presidio.models.agent.name import AgentName
 
 
@@ -243,22 +244,42 @@ class _BaseTerminusAgent(BaseAgent):
         except importlib.metadata.PackageNotFoundError:
             return "unknown"
 
+    def install_spec(self) -> AgentInstallSpec:
+        install_tmux = (
+            "set -e; "
+            "if command -v apt-get >/dev/null 2>&1; then "
+            "export DEBIAN_FRONTEND=noninteractive; "
+            "apt-get update -qq && apt-get install -y -qq tmux; "
+            "elif command -v apk >/dev/null 2>&1; then "
+            "apk add --no-cache tmux; "
+            "elif command -v dnf >/dev/null 2>&1; then "
+            "dnf install -y tmux; "
+            "elif command -v yum >/dev/null 2>&1; then "
+            "yum install -y tmux; "
+            "else echo 'No supported package manager found' >&2; exit 1; fi"
+        )
+        return AgentInstallSpec(
+            agent_name=self.name(),
+            version=self.version(),
+            steps=[InstallStep(run=install_tmux, user="root")],
+            verification_command="tmux -V",
+        )
+
     async def setup(self, environment: BaseEnvironment) -> None:
         command = (
             "set -e; "
-            "if ! command -v tmux >/dev/null 2>&1; then "
-            "export DEBIAN_FRONTEND=noninteractive; "
-            "if command -v apt-get >/dev/null 2>&1; then "
-            "apt-get update -qq && apt-get install -y -qq tmux; "
-            "elif command -v apk >/dev/null 2>&1; then apk add --no-cache tmux; "
-            "elif command -v dnf >/dev/null 2>&1; then dnf install -y tmux; "
-            "elif command -v yum >/dev/null 2>&1; then yum install -y tmux; "
-            "else echo 'No supported package manager found' >&2; exit 1; fi; "
-            "fi; mkdir -p /tmp/presidio-terminus && chmod 777 /tmp/presidio-terminus"
+            "command -v tmux >/dev/null 2>&1 || { "
+            "echo 'tmux is missing; build-time agent installation was unavailable' "
+            ">&2; exit 1; "
+            "}; "
+            "mkdir -p /tmp/presidio-terminus && chmod 777 /tmp/presidio-terminus"
         )
-        result = await environment.exec(command=command, user="root")
+        result = await environment.exec(command=command)
         if result.return_code != 0:
-            raise RuntimeError("Failed to install tmux in the sandbox")
+            raise RuntimeError(
+                "tmux must be present in the image; build-time installation was "
+                "unavailable"
+            )
 
     async def run(
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
