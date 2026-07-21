@@ -1,4 +1,9 @@
+import json
+from types import SimpleNamespace
+
 from presidio.agents.terminus import PresidioTmuxSession, Terminus2Agent, TerminusAgent
+from presidio.models.trajectories import Trajectory
+from presidio.worker import _progress_payload
 
 
 def _session() -> PresidioTmuxSession:
@@ -54,3 +59,60 @@ def test_render_instruction(tmp_path):
 
     assert "Marker text" in rendered
     assert "Original instruction" in rendered
+
+
+def test_build_trajectory_from_episode_logs(tmp_path):
+    agent = TerminusAgent(
+        logs_dir=tmp_path,
+        model_name="anthropic/x",
+    )
+    for episode_number, usage in ((7, (11, 3)), (2, (17, 5))):
+        episode_dir = tmp_path / f"episode-{episode_number}"
+        episode_dir.mkdir()
+        (episode_dir / "response.json").write_text(
+            json.dumps(
+                {
+                    "state_analysis": f"State {episode_number}",
+                    "explanation": f"Explain {episode_number}",
+                    "commands": [
+                        {
+                            "keystrokes": "pwd\n",
+                            "is_blocking": True,
+                            "timeout_sec": 5.0,
+                        }
+                    ],
+                }
+            )
+        )
+        (episode_dir / "debug.json").write_text(
+            json.dumps(
+                {
+                    "start_time": "2026-01-02T03:04:05",
+                    "original_response": json.dumps(
+                        {"usage": {"prompt_tokens": usage[0], "completion_tokens": usage[1]}}
+                    ),
+                }
+            )
+        )
+
+    result = SimpleNamespace(total_input_tokens=28, total_output_tokens=8)
+    trajectory = agent._write_trajectory(result)
+
+    assert trajectory is not None
+    assert [step.step_id for step in trajectory.steps] == [1, 2]
+    assert [step.message for step in trajectory.steps] == [
+        "State 2\nExplain 2",
+        "State 7\nExplain 7",
+    ]
+    assert trajectory.final_metrics.total_prompt_tokens == 28
+    assert trajectory.final_metrics.total_completion_tokens == 8
+    serialized = trajectory.to_json_dict()
+    round_tripped = Trajectory.model_validate_json(json.dumps(serialized))
+    assert len(round_tripped.steps) == 2
+    assert _progress_payload(serialized) == {
+        "n_steps": 2,
+        "last_tool": "terminal",
+        "tokens_in": 28,
+        "tokens_out": 8,
+    }
+    assert (tmp_path / "trajectory.json").exists()

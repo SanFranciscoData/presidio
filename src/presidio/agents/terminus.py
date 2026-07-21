@@ -1,9 +1,11 @@
 import asyncio
 import importlib.metadata
+import json
 import os
 import re
 import shlex
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,14 @@ from presidio.environments.base import BaseEnvironment
 from presidio.models.agent.context import AgentContext
 from presidio.models.agent.install import AgentInstallSpec, InstallStep
 from presidio.models.agent.name import AgentName
+from presidio.models.trajectories import (
+    Agent,
+    FinalMetrics,
+    Metrics,
+    Step,
+    ToolCall,
+    Trajectory,
+)
 from presidio.utils.templating import render_prompt_template
 
 
@@ -214,7 +224,7 @@ class PresidioTmuxSession:
 
 
 class _BaseTerminusAgent(BaseAgent):
-    SUPPORTS_ATIF = False
+    SUPPORTS_ATIF = True
     SUPPORTS_WINDOWS = False
 
     def __init__(
@@ -274,6 +284,139 @@ class _BaseTerminusAgent(BaseAgent):
         if self._prompt_template_path:
             return render_prompt_template(self._prompt_template_path, instruction)
         return instruction
+
+    def _build_trajectory(self, result: Any) -> Trajectory | None:
+        episode_dirs = []
+        for episode_dir in self.logs_dir.glob("episode-*"):
+            if not episode_dir.is_dir():
+                continue
+            match = re.fullmatch(r"episode-(\d+)", episode_dir.name)
+            if match:
+                episode_dirs.append((int(match.group(1)), episode_dir))
+        episode_dirs.sort(key=lambda item: item[0])
+        if not episode_dirs:
+            return None
+
+        steps = []
+        for step_id, (episode_number, episode_dir) in enumerate(
+            episode_dirs, start=1
+        ):
+            response = self._read_json(episode_dir / "response.json")
+            debug = self._read_json(episode_dir / "debug.json")
+            message_parts = [
+                value
+                for key in ("state_analysis", "explanation")
+                if isinstance(value := response.get(key), str) and value
+            ]
+            tool_calls = []
+            commands = response.get("commands")
+            if isinstance(commands, list):
+                for index, command in enumerate(commands):
+                    if not isinstance(command, dict):
+                        continue
+                    tool_calls.append(
+                        ToolCall(
+                            tool_call_id=f"ep{episode_number}-{index}",
+                            function_name="terminal",
+                            arguments=command,
+                        )
+                    )
+
+            step_kwargs: dict[str, Any] = {
+                "step_id": step_id,
+                "source": "agent",
+                "model_name": self.model_name,
+                "message": "\n".join(message_parts),
+            }
+            if tool_calls:
+                step_kwargs["tool_calls"] = tool_calls
+            metrics = self._episode_metrics(debug)
+            if metrics is not None:
+                step_kwargs["metrics"] = metrics
+            timestamp = self._episode_timestamp(debug)
+            if timestamp is not None:
+                step_kwargs["timestamp"] = timestamp
+            steps.append(Step(**step_kwargs))
+
+        return Trajectory(
+            schema_version="ATIF-v1.7",
+            agent=Agent(
+                name=self.name(),
+                version=self.version(),
+                model_name=self.model_name,
+            ),
+            steps=steps,
+            final_metrics=FinalMetrics(
+                total_prompt_tokens=self._optional_int(
+                    getattr(result, "total_input_tokens", None)
+                ),
+                total_completion_tokens=self._optional_int(
+                    getattr(result, "total_output_tokens", None)
+                ),
+                total_steps=len(steps),
+            ),
+        )
+
+    @staticmethod
+    def _read_json(path: Path) -> dict[str, Any]:
+        try:
+            value = json.loads(path.read_text())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @classmethod
+    def _optional_int(cls, value: Any) -> int | None:
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    @classmethod
+    def _episode_metrics(cls, debug: dict[str, Any]) -> Metrics | None:
+        original_response = debug.get("original_response")
+        if not isinstance(original_response, str):
+            return None
+        try:
+            response = json.loads(original_response)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(response, dict):
+            return None
+        usage = response.get("usage")
+        if not isinstance(usage, dict):
+            return None
+        prompt_tokens = cls._optional_int(usage.get("prompt_tokens"))
+        completion_tokens = cls._optional_int(usage.get("completion_tokens"))
+        if prompt_tokens is None and completion_tokens is None:
+            return None
+        return Metrics(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+
+    @staticmethod
+    def _episode_timestamp(debug: dict[str, Any]) -> str | None:
+        timestamp = debug.get("start_time")
+        if not isinstance(timestamp, str):
+            return None
+        try:
+            datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return timestamp
+
+    def _write_trajectory(self, result: Any) -> Trajectory | None:
+        trajectory = self._build_trajectory(result)
+        if trajectory is None:
+            return None
+        try:
+            trajectory_path = self.logs_dir / "trajectory.json"
+            trajectory_path.write_text(
+                json.dumps(trajectory.to_json_dict(), indent=2)
+            )
+        except (OSError, TypeError, ValueError):
+            self.logger.warning(
+                "Failed to write Terminus ATIF trajectory", exc_info=True
+            )
+        return trajectory
 
     async def setup(self, environment: BaseEnvironment) -> None:
         command = (
@@ -335,6 +478,9 @@ class _BaseTerminusAgent(BaseAgent):
             context.n_input_tokens = result.total_input_tokens
         if result.total_output_tokens is not None:
             context.n_output_tokens = result.total_output_tokens
+        trajectory = self._write_trajectory(result)
+        if trajectory is not None:
+            context.n_agent_steps = len(trajectory.steps)
 
     def _make_tb_agent(self):
         raise NotImplementedError
