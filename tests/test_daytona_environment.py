@@ -393,7 +393,8 @@ def test_daytona_directory_layer_restores_dockerfile_user(tmp_path):
     assert (
         "RUN mkdir -p /logs /logs/agent /logs/verifier /logs/artifacts "
         "/tests /solution && chmod -R 0777 /logs && chmod 0755 /tests /solution "
-        "&& chown user /tests /solution"
+        "&& chown user /tests /solution "
+        "&& touch /etc/hosts && chown user /etc/hosts"
     ) in dockerfile
     assert "chmod -R 777 /logs /tests /solution" not in dockerfile
     assert dockerfile.rstrip().endswith("USER user")
@@ -413,6 +414,9 @@ def test_daytona_directory_layer_root_image_no_chown(tmp_path):
     dockerfile = image.dockerfile()
     assert "chmod 0755 /tests /solution" in dockerfile
     assert "chown" not in dockerfile
+    # Root image has runtime root, so /etc/hosts stays root-owned (no build-time
+    # ownership hand-off); _pin_resolved_hosts writes it directly.
+    assert "/etc/hosts" not in dockerfile
     assert "chmod -R 777 /logs /tests /solution" not in dockerfile
 
 

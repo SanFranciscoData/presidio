@@ -1126,6 +1126,14 @@ class DaytonaEnvironment(BaseEnvironment):
         )
         if restore_user:
             setup += f" && chown {restore_user} /tests /solution"
+            # /etc/hosts is appended at runtime by _pin_resolved_hosts to pin the
+            # resolved network-allowlist IPs. Daytona *direct* mode exposes no
+            # runtime root, so a non-root task image cannot append to /etc/hosts
+            # at runtime -- give the single run user ownership of the file at
+            # build time. Egress reachability is enforced by the Daytona CIDR
+            # network allowlist, not by /etc/hosts, so this does not widen
+            # network access; it only lets the run user write the DNS pins.
+            setup += f" && touch /etc/hosts && chown {restore_user} /etc/hosts"
         commands = ["USER root", f"RUN {setup}"]
         if restore_user:
             commands.append(f"USER {restore_user}")
