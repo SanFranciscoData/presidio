@@ -66,7 +66,11 @@ def test_build_trajectory_from_episode_logs(tmp_path):
         logs_dir=tmp_path,
         model_name="anthropic/x",
     )
-    for episode_number, usage in ((7, (11, 3)), (2, (17, 5))):
+    usage_by_episode = (
+        (7, {"input_tokens": 11, "output_tokens": 3}),
+        (2, {"prompt_tokens": 17, "completion_tokens": 5}),
+    )
+    for episode_number, usage in usage_by_episode:
         episode_dir = tmp_path / f"episode-{episode_number}"
         episode_dir.mkdir()
         (episode_dir / "response.json").write_text(
@@ -89,7 +93,7 @@ def test_build_trajectory_from_episode_logs(tmp_path):
                 {
                     "start_time": "2026-01-02T03:04:05",
                     "original_response": json.dumps(
-                        {"usage": {"prompt_tokens": usage[0], "completion_tokens": usage[1]}}
+                        {"usage": usage}
                     ),
                 }
             )
@@ -106,6 +110,11 @@ def test_build_trajectory_from_episode_logs(tmp_path):
     ]
     assert trajectory.final_metrics.total_prompt_tokens == 28
     assert trajectory.final_metrics.total_completion_tokens == 8
+    assert [
+        (step.metrics.prompt_tokens, step.metrics.completion_tokens)
+        for step in trajectory.steps
+        if step.metrics is not None
+    ] == [(17, 5), (11, 3)]
     serialized = trajectory.to_json_dict()
     round_tripped = Trajectory.model_validate_json(json.dumps(serialized))
     assert len(round_tripped.steps) == 2

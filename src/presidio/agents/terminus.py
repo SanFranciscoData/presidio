@@ -385,6 +385,10 @@ class _BaseTerminusAgent(BaseAgent):
             return None
         prompt_tokens = cls._optional_int(usage.get("prompt_tokens"))
         completion_tokens = cls._optional_int(usage.get("completion_tokens"))
+        if prompt_tokens is None:
+            prompt_tokens = cls._optional_int(usage.get("input_tokens"))
+        if completion_tokens is None:
+            completion_tokens = cls._optional_int(usage.get("output_tokens"))
         if prompt_tokens is None and completion_tokens is None:
             return None
         return Metrics(
