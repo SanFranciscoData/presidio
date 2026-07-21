@@ -12,6 +12,7 @@ from presidio.environments.base import BaseEnvironment
 from presidio.models.agent.context import AgentContext
 from presidio.models.agent.install import AgentInstallSpec, InstallStep
 from presidio.models.agent.name import AgentName
+from presidio.utils.templating import render_prompt_template
 
 
 class _EnvExecResult:
@@ -221,6 +222,7 @@ class _BaseTerminusAgent(BaseAgent):
         logs_dir: Path,
         model_name: str | None = None,
         extra_env: dict[str, str] | None = None,
+        prompt_template_path: Path | str | None = None,
         max_episodes: int | None = None,
         api_base: str | None = None,
         temperature: float = 0.7,
@@ -230,6 +232,9 @@ class _BaseTerminusAgent(BaseAgent):
     ):
         super().__init__(logs_dir=logs_dir, model_name=model_name, **kwargs)
         self._extra_env = dict(extra_env or {})
+        self._prompt_template_path = (
+            Path(prompt_template_path) if prompt_template_path else None
+        )
         self._max_episodes = max_episodes
         self._api_base = api_base
         self._temperature = temperature
@@ -265,6 +270,11 @@ class _BaseTerminusAgent(BaseAgent):
             verification_command="tmux -V",
         )
 
+    def _render_instruction(self, instruction: str) -> str:
+        if self._prompt_template_path:
+            return render_prompt_template(self._prompt_template_path, instruction)
+        return instruction
+
     async def setup(self, environment: BaseEnvironment) -> None:
         command = (
             "set -e; "
@@ -288,6 +298,7 @@ class _BaseTerminusAgent(BaseAgent):
             raise ValueError(
                 "Terminus requires a model name in 'provider/model' format."
             )
+        instruction = self._render_instruction(instruction)
         loop = asyncio.get_running_loop()
 
         def _run_sync():

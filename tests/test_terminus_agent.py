@@ -39,3 +39,18 @@ def test_agent_names_and_install_spec(tmp_path):
     ).install_spec()
     assert spec.agent_name == "terminus"
     assert "tmux" in spec.steps[0].run
+
+
+def test_render_instruction(tmp_path):
+    template_path = tmp_path / "prompt_template.txt"
+    template_path.write_text("Marker text\n{{ instruction }}")
+    agent = TerminusAgent(
+        logs_dir=tmp_path,
+        model_name="anthropic/x",
+        prompt_template_path=template_path,
+    )
+
+    rendered = agent._render_instruction("Original instruction")
+
+    assert "Marker text" in rendered
+    assert "Original instruction" in rendered
