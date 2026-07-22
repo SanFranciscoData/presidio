@@ -305,11 +305,13 @@ class _DaytonaDirect(_DaytonaStrategy):
 
         params: _SandboxParams
         if snapshot_exists and snapshot_name:
+            env._direct_image_built_from_dockerfile = False
             params = CreateSandboxFromSnapshotParams(
                 snapshot=snapshot_name,
                 **env._base_sandbox_params(),
             )
         elif force_build or not env.task_env_config.docker_image:
+            env._direct_image_built_from_dockerfile = True
             runtime_user = env._dockerfile_runtime_user()
             image = env._with_agent_install(Image.from_dockerfile(env._dockerfile_path))
             image = env._with_daytona_directory_layer(image, runtime_user=runtime_user)
@@ -323,6 +325,7 @@ class _DaytonaDirect(_DaytonaStrategy):
                 **kwargs,
             )
         else:
+            env._direct_image_built_from_dockerfile = False
             image = env._with_agent_install(
                 Image.base(env.task_env_config.docker_image)
             )
@@ -882,6 +885,7 @@ class DaytonaEnvironment(BaseEnvironment):
         self._daytona_su_warned: set[str] = set()
         self._keepalive_task: asyncio.Task[None] | None = None
         self._client_manager: DaytonaClientManager | None = None
+        self._direct_image_built_from_dockerfile = True
         self._dockerfile_workdir_cache: str | None = None
         self._dockerfile_workdir_parsed = False
 
@@ -1697,7 +1701,10 @@ class DaytonaEnvironment(BaseEnvironment):
         env = self._merge_env(env)
         effective_cwd = cwd or self.task_env_config.workdir
         if not effective_cwd and not self._compose_mode:
-            effective_cwd = self._dockerfile_workdir() or "/"
+            if self._direct_image_built_from_dockerfile:
+                effective_cwd = self._dockerfile_workdir() or "/"
+            else:
+                effective_cwd = "/"
         return await self._strategy.exec(
             command,
             cwd=effective_cwd,

@@ -121,6 +121,7 @@ def test_daytona_compose_resets_directories_as_root():
 def _reset_test_env(*, compose_mode: bool, default_user: str | None):
     env = DaytonaEnvironment.__new__(DaytonaEnvironment)
     env._compose_mode = compose_mode
+    env._direct_image_built_from_dockerfile = True
     env._persistent_env = {}
     env.default_user = default_user
     env.task_env_config = type(
@@ -234,6 +235,17 @@ def test_daytona_exec_empty_workdir_uses_dockerfile_workdir(tmp_path):
     asyncio.run(env.exec("echo ready"))
 
     assert env._strategy.exec.await_args.kwargs["cwd"] == "/app"
+
+
+def test_daytona_exec_prebuilt_image_ignores_dockerfile_workdir(tmp_path):
+    env = _reset_test_env(compose_mode=False, default_user=None)
+    env._direct_image_built_from_dockerfile = False
+    env.environment_dir = tmp_path
+    (tmp_path / "Dockerfile").write_text("FROM alpine\nWORKDIR /app\n")
+
+    asyncio.run(env.exec("echo ready"))
+
+    assert env._strategy.exec.await_args.kwargs["cwd"] == "/"
 
 
 def test_daytona_exec_preserves_explicit_workdir_and_cwd(tmp_path):
