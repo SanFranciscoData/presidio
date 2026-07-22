@@ -286,11 +286,10 @@ def test_cleanup_orphans_deletes_only_owned_sandboxes(tmp_path):
     listed_labels: list[dict] = []
 
     class FakeClient:
-        async def list(self, labels=None):
-            listed_labels.append(labels)
-            return types.SimpleNamespace(
-                items=[current, FakeSandbox("orphan-1"), FakeSandbox("orphan-2")]
-            )
+        async def list(self, query=None):
+            listed_labels.append(query.labels if query is not None else None)
+            for sandbox in (current, FakeSandbox("orphan-1"), FakeSandbox("orphan-2")):
+                yield sandbox
 
     class FakeManager:
         async def get_client(self):
@@ -304,6 +303,24 @@ def test_cleanup_orphans_deletes_only_owned_sandboxes(tmp_path):
     assert listed_labels == [{DAYTONA_OWNER_LABEL: env._owner_token}]
 
 
+def test_direct_strategy_is_dir_and_is_file_treat_missing_path_as_absent(tmp_path):
+    from daytona import DaytonaNotFoundError
+
+    from presidio.environments.daytona import _DaytonaDirect
+
+    env = _make_env(tmp_path)
+
+    class FakeFs:
+        async def get_file_info(self, path):
+            raise DaytonaNotFoundError("Failed to get file info: ")
+
+    env._sandbox = types.SimpleNamespace(fs=FakeFs())  # type: ignore[assignment]
+    strategy = _DaytonaDirect(env)
+
+    assert asyncio.run(strategy.is_dir("/no/such/dir")) is False
+    assert asyncio.run(strategy.is_file("/no/such/file")) is False
+
+
 # --- session command polling ------------------------------------------------
 
 
@@ -312,7 +329,7 @@ def test_session_command_poll_timeout_is_bounded(tmp_path, monkeypatch):
     env._sandbox = types.SimpleNamespace()
     monkeypatch.setattr(
         daytona_environment,
-        "DAYTONA_SESSION_COMMAND_DEFAULT_TIMEOUT_SEC",
+        "DAYTONA_SESSION_COMMAND_GRACE_SEC",
         0.01,
     )
 
@@ -326,10 +343,15 @@ def test_session_command_poll_timeout_is_bounded(tmp_path, monkeypatch):
             env._poll_response(
                 "session-1",
                 "command-1",
+                timeout_sec=0,
                 command="mkdir -p /logs",
             )
         )
     assert time.monotonic() - started < 1
+
+
+def test_session_command_poll_untimed_command_has_no_deadline():
+    assert DaytonaEnvironment._session_command_poll_timeout(None) is None
 
 
 def test_session_command_poll_returns_terminal_response(tmp_path, monkeypatch):

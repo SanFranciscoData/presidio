@@ -54,6 +54,7 @@ try:
         FileDownloadRequest,
         FileUpload,
         Image,
+        ListSandboxesQuery,
         Resources,
         SessionExecuteRequest,
     )
@@ -93,7 +94,6 @@ DAYTONA_CREATE_MAX_ATTEMPTS = 2
 DAYTONA_RATE_LIMIT_MAX_ATTEMPTS = 5
 DAYTONA_RATE_LIMIT_MAX_DELAY_SEC = 120.0
 DAYTONA_SESSION_COMMAND_GRACE_SEC = 60.0
-DAYTONA_SESSION_COMMAND_DEFAULT_TIMEOUT_SEC = 300.0
 
 
 def _mb_to_gib_ceil(mb: int) -> int:
@@ -461,13 +461,21 @@ class _DaytonaDirect(_DaytonaStrategy):
     async def is_dir(self, path: str, user: str | int | None = None) -> bool:
         if not self._env._sandbox:
             raise RuntimeError("Sandbox not found. Please build the environment first.")
-        file_info = await self._env._sandbox.fs.get_file_info(path)
+        try:
+            file_info = await self._env._sandbox.fs.get_file_info(path)
+        except DaytonaNotFoundError:
+            # A missing path is "not a directory", matching the DinD strategy's
+            # `test -d` semantics.
+            return False
         return file_info.is_dir
 
     async def is_file(self, path: str, user: str | int | None = None) -> bool:
         if not self._env._sandbox:
             raise RuntimeError("Sandbox not found. Please build the environment first.")
-        file_info = await self._env._sandbox.fs.get_file_info(path)
+        try:
+            file_info = await self._env._sandbox.fs.get_file_info(path)
+        except DaytonaNotFoundError:
+            return False
         return not file_info.is_dir
 
     async def attach(self) -> None:
@@ -1304,8 +1312,8 @@ class DaytonaEnvironment(BaseEnvironment):
             return
         try:
             daytona = await self._client_manager.get_client()
-            result = await daytona.list(labels=self._ownership_labels())
-            for sandbox in result.items:
+            query = ListSandboxesQuery(labels=self._ownership_labels())
+            async for sandbox in daytona.list(query):
                 if self._sandbox is not None and sandbox.id == self._sandbox.id:
                     continue
                 try:
@@ -1468,9 +1476,17 @@ class DaytonaEnvironment(BaseEnvironment):
         )
 
     @staticmethod
-    def _session_command_poll_timeout(timeout_sec: int | None) -> float:
+    def _session_command_poll_timeout(timeout_sec: int | None) -> float | None:
+        """Polling deadline for a session command.
+
+        A command with an explicit timeout is polled for that long plus a
+        grace period. A command without one (e.g. a long agent run whose
+        budget is enforced by the caller via ``asyncio.wait_for``) is polled
+        without an independent deadline, so polling cannot expire before the
+        caller's own budget does.
+        """
         if timeout_sec is None:
-            return DAYTONA_SESSION_COMMAND_DEFAULT_TIMEOUT_SEC
+            return None
         return timeout_sec + DAYTONA_SESSION_COMMAND_GRACE_SEC
 
     async def _poll_response(
@@ -1485,7 +1501,9 @@ class DaytonaEnvironment(BaseEnvironment):
             raise RuntimeError("Sandbox not found. Please build the environment first.")
 
         poll_timeout_sec = self._session_command_poll_timeout(timeout_sec)
-        deadline = time.monotonic() + poll_timeout_sec
+        deadline = (
+            None if poll_timeout_sec is None else time.monotonic() + poll_timeout_sec
+        )
 
         def _timed_out() -> TimeoutError:
             return TimeoutError(
@@ -1494,10 +1512,16 @@ class DaytonaEnvironment(BaseEnvironment):
                 f"command={command!r})"
             )
 
-        async def get_response(current_command_id: str):
+        def _remaining() -> float | None:
+            if deadline is None:
+                return None
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise _timed_out()
+            return remaining
+
+        async def get_response(current_command_id: str):
+            remaining = _remaining()
             try:
                 return await asyncio.wait_for(
                     self._get_session_command_with_retry(
@@ -1511,10 +1535,8 @@ class DaytonaEnvironment(BaseEnvironment):
 
         response = await get_response(command_id)
         while response.exit_code is None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise _timed_out()
-            await asyncio.sleep(min(1, remaining))
+            remaining = _remaining()
+            await asyncio.sleep(1 if remaining is None else min(1, remaining))
             response = await get_response(response.id)
 
         logs = await self._get_session_command_logs_with_retry(session_id, command_id)
