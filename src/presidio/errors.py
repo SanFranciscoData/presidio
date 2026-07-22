@@ -10,6 +10,11 @@ from enum import Enum
 CAPACITY_LIMIT_MARKERS = ("limit exceeded",)
 
 
+def message_matches_markers(message: str, markers: tuple[str, ...]) -> bool:
+    lowered = message.lower()
+    return any(marker in lowered for marker in markers)
+
+
 class ErrorClass(str, Enum):
     CONFIG_FATAL = "config_fatal"
     EGRESS_MISCONFIG = "egress_misconfig"
