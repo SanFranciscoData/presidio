@@ -3,12 +3,9 @@ from __future__ import annotations
 import asyncio
 import atexit
 import email.utils
-import ipaddress
 import os
-import random
 import re
 import shlex
-import socket
 import tempfile
 import time
 from abc import abstractmethod
@@ -75,7 +72,7 @@ _SandboxParams = Union[
     "CreateSandboxFromImageParams", "CreateSandboxFromSnapshotParams"
 ]
 
-DAYTONA_MAX_NETWORK_ALLOWLIST_CIDRS = 10
+DAYTONA_MAX_NETWORK_ALLOWLIST_DOMAINS = 20
 DAYTONA_OWNER_LABEL = "presidio.owner-token"
 DAYTONA_DEFAULT_AUTO_STOP_INTERVAL_MINS = 60
 DAYTONA_DEFAULT_AUTO_DELETE_INTERVAL_MINS = 0
@@ -138,66 +135,6 @@ def _daytona_preflight() -> None:
             "DAYTONA_JWT_TOKEN and DAYTONA_ORGANIZATION_ID, to be set. "
             "Please set the required environment variables and try again."
         )
-
-
-def _collapse_cidrs_to_budget(cidrs: list[str], *, budget: int) -> list[str]:
-    networks = [
-        ipaddress.ip_network(cidr, strict=False)
-        for cidr in cidrs
-        if ipaddress.ip_network(cidr, strict=False).version == 4
-    ]
-    working = list(ipaddress.collapse_addresses(networks))
-    while len(working) > budget:
-        working.sort(key=lambda net: (-net.prefixlen, int(net.network_address)))
-        working[0] = working[0].supernet()
-        working = list(ipaddress.collapse_addresses(working))
-    return sorted(str(net) for net in working)
-
-
-def _cidrs_from_domain_resolution(
-    domain_resolution: dict[str, list[str]],
-) -> list[str]:
-    cidrs: list[str] = []
-    for addrs in domain_resolution.values():
-        for addr in addrs:
-            ip = ipaddress.ip_address(addr)
-            if ip.version == 4:
-                cidrs.append(f"{addr}/32")
-    return _collapse_cidrs_to_budget(
-        sorted(set(cidrs)),
-        budget=DAYTONA_MAX_NETWORK_ALLOWLIST_CIDRS,
-    )
-
-
-def resolve_network_allowlist_to_daytona_cidrs(
-    domains: list[str],
-) -> tuple[dict[str, list[str]], list[str]]:
-    """Resolve exact allowlist domains into Daytona-compatible IPv4 CIDRs.
-
-    Daytona network limits accept IPv4 CIDR blocks only. Leading-dot suffix
-    domains cannot be resolved deterministically, so they are ignored here.
-    """
-    domain_resolution: dict[str, list[str]] = {}
-    for domain in sorted(set(domains)):
-        if domain.startswith("."):
-            continue
-        try:
-            addrs = sorted(
-                {
-                    info[4][0]
-                    for info in socket.getaddrinfo(
-                        domain,
-                        443,
-                        family=socket.AF_INET,
-                        type=socket.SOCK_STREAM,
-                    )
-                }
-            )
-        except socket.gaierror:
-            addrs = []
-        domain_resolution[domain] = addrs
-
-    return domain_resolution, _cidrs_from_domain_resolution(domain_resolution)
 
 
 class DaytonaClientManager:
@@ -405,7 +342,6 @@ class _DaytonaDirect(_DaytonaStrategy):
 
         await env._create_sandbox(params=params)
         await env._provision_directories()
-        await env._pin_resolved_hosts()
 
     async def stop(self, delete: bool) -> None:
         env = self._env
@@ -645,7 +581,6 @@ class _DaytonaDinD(_DaytonaStrategy):
             )
 
         await env._create_sandbox(params=params)
-        await env._pin_resolved_hosts()
 
         await self._vm_exec(
             "dockerd-entrypoint.sh dockerd > /var/log/dockerd.log 2>&1 &",
@@ -939,8 +874,6 @@ class DaytonaEnvironment(BaseEnvironment):
         self._daytona_su_warned: set[str] = set()
         self._keepalive_task: asyncio.Task[None] | None = None
         self._client_manager: DaytonaClientManager | None = None
-        self._resolved_network_allow_list: str | None = None
-        self._network_resolution_debug: dict[str, Any] = {}
 
         self._strategy: _DaytonaStrategy = (
             _DaytonaDinD(self) if self._compose_mode else _DaytonaDirect(self)
@@ -1154,48 +1087,28 @@ class DaytonaEnvironment(BaseEnvironment):
         if not self.network_allowlist.domains:
             return {"network_block_all": True}
 
-        if self._resolved_network_allow_list is None:
-            suffix_domains = [
-                domain
+        domains = sorted(
+            {
+                f"*.{domain.lstrip('.')}" if domain.startswith(".") else domain
                 for domain in self.network_allowlist.domains
-                if domain.startswith(".")
-            ]
-            if suffix_domains:
-                self.logger.warning(
-                    "Daytona network limits only accept IPv4 CIDRs; ignoring "
-                    "suffix allowlist domains: %s",
-                    ", ".join(suffix_domains),
-                )
-
-            domain_resolution, cidrs = resolve_network_allowlist_to_daytona_cidrs(
-                self.network_allowlist.domains
-            )
-            full_cidr_count = sum(len(addrs) for addrs in domain_resolution.values())
-            if full_cidr_count > DAYTONA_MAX_NETWORK_ALLOWLIST_CIDRS:
-                self.logger.warning(
-                    "Resolved Daytona network allowlist has %d IPv4 addresses; "
-                    "collapsing to %d CIDR entries. This can allow broader CDN "
-                    "ranges than the original domains.",
-                    full_cidr_count,
-                    DAYTONA_MAX_NETWORK_ALLOWLIST_CIDRS,
-                )
-            self._network_resolution_debug = {
-                "domains": self.network_allowlist.domains,
-                "domain_resolution": domain_resolution,
-                "cidr_allowlist": cidrs,
+                if domain.lstrip(".")
             }
-            self._resolved_network_allow_list = ",".join(cidrs) if cidrs else ""
-
-        if not self._resolved_network_allow_list:
+        )
+        if len(domains) > DAYTONA_MAX_NETWORK_ALLOWLIST_DOMAINS:
             self.logger.warning(
-                "No Daytona-compatible CIDRs resolved from network allowlist; "
-                "blocking all network access."
+                "Daytona domain allowlist has %d entries; keeping the first %d "
+                "sorted entries.",
+                len(domains),
+                DAYTONA_MAX_NETWORK_ALLOWLIST_DOMAINS,
             )
+            domains = domains[:DAYTONA_MAX_NETWORK_ALLOWLIST_DOMAINS]
+
+        if not domains:
             return {"network_block_all": True}
 
         return {
             "network_block_all": False,
-            "network_allow_list": self._resolved_network_allow_list,
+            "domain_allow_list": ",".join(domains),
         }
 
     async def _configure_daytona_client(self) -> None:
@@ -1241,50 +1154,6 @@ class DaytonaEnvironment(BaseEnvironment):
             **self._network_params(),
         }
 
-    async def _pin_resolved_hosts(self) -> None:
-        """Pin resolved allowlist domains so restricted sandboxes do not need DNS.
-
-        Pins **every** resolved IP per domain (not just the first), in a
-        per-sandbox randomized order. A domain like
-        ``generativelanguage.googleapis.com`` is served by a rotating pool of
-        frontend IPs; pinning a single one funnels every sandbox's traffic
-        through that one frontend, which under many concurrent sandboxes triggers
-        connection resets ("fetch failed sending request") with no failover. All
-        resolved IPs are already in the CIDR allowlist, so pinning them all lets
-        the agent fail over across frontends, and the shuffle spreads the
-        first-choice IP across concurrent sandboxes so load is not concentrated.
-        """
-        domain_resolution = self._network_resolution_debug.get("domain_resolution")
-        if not isinstance(domain_resolution, dict):
-            return
-
-        lines: list[str] = []
-        for domain, addrs in sorted(domain_resolution.items()):
-            if not isinstance(domain, str):
-                continue
-            valid = [value for value in addrs if isinstance(value, str)]
-            if not valid:
-                continue
-            random.shuffle(valid)
-            lines.extend(f"{addr} {domain}" for addr in valid)
-
-        if not lines:
-            return
-
-        hosts = "\n".join(lines) + "\n"
-        command = (
-            "cat >> /etc/hosts <<'EOF'\n"
-            "# Presidio Daytona network allowlist host pins\n"
-            f"{hosts}"
-            "EOF"
-        )
-        shell = "sh -c" if self._compose_mode else "bash -c"
-        result = await self._sandbox_exec(command, shell=shell)
-        if result.return_code != 0:
-            raise RuntimeError(
-                f"Failed to pin Daytona resolved hosts: {result.stdout} {result.stderr}"
-            )
-
     def _compose_should_block_main_network(self) -> bool:
         if self.task_env_config.allow_internet:
             return False
@@ -1292,7 +1161,9 @@ class DaytonaEnvironment(BaseEnvironment):
             return False
         if self._explicit_network_allow_list:
             return False
-        return not self._resolved_network_allow_list
+        return not any(
+            domain.lstrip(".") for domain in self.network_allowlist.domains
+        )
 
     async def _cleanup_orphan_sandboxes(self) -> None:
         """Best-effort deletion of sandboxes created by this environment instance.

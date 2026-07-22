@@ -1,94 +1,75 @@
 import asyncio
 import logging
-import socket
 from unittest.mock import AsyncMock, call
 
 import pytest
 
 from presidio.environments.daytona import (
-    DAYTONA_MAX_NETWORK_ALLOWLIST_CIDRS,
+    DAYTONA_MAX_NETWORK_ALLOWLIST_DOMAINS,
     DaytonaClientManager,
     DaytonaEnvironment,
     _DaytonaDirect,
     _DaytonaDinD,
-    resolve_network_allowlist_to_daytona_cidrs,
 )
 from presidio.models.agent.network import NetworkAllowlist
 from presidio.models.task.config import TaskOS
 from presidio.models.trial.paths import EnvironmentPaths
 
 
-def _addr(ip: str):
-    return (socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 443))
-
-
-def test_daytona_resolves_domains_to_ipv4_cidrs(monkeypatch):
-    def fake_getaddrinfo(host, *_args, **_kwargs):
-        assert host == "api.openai.com"
-        return [_addr("203.0.113.10"), _addr("203.0.113.10")]
-
-    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
-
-    resolution, cidrs = resolve_network_allowlist_to_daytona_cidrs(
-        ["api.openai.com", ".anthropic.com"]
-    )
-
-    assert resolution == {"api.openai.com": ["203.0.113.10"]}
-    assert cidrs == ["203.0.113.10/32"]
-
-
-def test_daytona_collapses_resolved_cidrs_to_daytona_limit(monkeypatch):
-    def fake_getaddrinfo(_host, *_args, **_kwargs):
-        return [_addr(f"203.0.113.{i}") for i in range(1, 18)]
-
-    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
-
-    _resolution, cidrs = resolve_network_allowlist_to_daytona_cidrs(["api.openai.com"])
-
-    assert len(cidrs) <= DAYTONA_MAX_NETWORK_ALLOWLIST_CIDRS
-    assert all(cidr.endswith(("/32", "/31", "/30", "/29", "/28")) for cidr in cidrs)
-
-
-def test_daytona_network_params_use_resolved_allowlist(monkeypatch):
+def test_daytona_network_params_use_domain_allowlist():
     env = DaytonaEnvironment.__new__(DaytonaEnvironment)
     env._explicit_network_allow_list = None
     env._explicit_network_block_all = None
-    env._resolved_network_allow_list = None
-    env._network_resolution_debug = {}
     env.task_env_config = type("TaskEnv", (), {"allow_internet": False})()
     env.network_allowlist = NetworkAllowlist(domains=["api.openai.com"])
     env.logger = logging.getLogger("test")
 
-    monkeypatch.setattr(
-        "presidio.environments.daytona.resolve_network_allowlist_to_daytona_cidrs",
-        lambda domains: (
-            {"api.openai.com": ["203.0.113.10"]},
-            ["203.0.113.10/32"],
-        ),
-    )
-
     assert DaytonaEnvironment._network_params(env) == {
         "network_block_all": False,
-        "network_allow_list": "203.0.113.10/32",
+        "domain_allow_list": "api.openai.com",
     }
 
 
-def test_daytona_network_params_block_when_no_cidrs(monkeypatch):
+def test_daytona_network_params_preserves_wildcard_domain():
     env = DaytonaEnvironment.__new__(DaytonaEnvironment)
     env._explicit_network_allow_list = None
     env._explicit_network_block_all = None
-    env._resolved_network_allow_list = None
-    env._network_resolution_debug = {}
     env.task_env_config = type("TaskEnv", (), {"allow_internet": False})()
     env.network_allowlist = NetworkAllowlist(domains=[".anthropic.com"])
     env.logger = logging.getLogger("test")
 
-    monkeypatch.setattr(
-        "presidio.environments.daytona.resolve_network_allowlist_to_daytona_cidrs",
-        lambda domains: ({}, []),
-    )
+    assert DaytonaEnvironment._network_params(env) == {
+        "network_block_all": False,
+        "domain_allow_list": "*.anthropic.com",
+    }
+
+
+def test_daytona_network_params_block_when_domains_empty():
+    env = DaytonaEnvironment.__new__(DaytonaEnvironment)
+    env._explicit_network_allow_list = None
+    env._explicit_network_block_all = None
+    env.task_env_config = type("TaskEnv", (), {"allow_internet": False})()
+    env.network_allowlist = NetworkAllowlist(domains=[])
+    env.logger = logging.getLogger("test")
 
     assert DaytonaEnvironment._network_params(env) == {"network_block_all": True}
+
+
+def test_daytona_network_params_caps_domain_allowlist(caplog):
+    env = DaytonaEnvironment.__new__(DaytonaEnvironment)
+    env._explicit_network_allow_list = None
+    env._explicit_network_block_all = None
+    env.task_env_config = type("TaskEnv", (), {"allow_internet": False})()
+    domains = [f"api-{index}.example.com" for index in range(25)]
+    env.network_allowlist = NetworkAllowlist(domains=domains)
+    env.logger = logging.getLogger("test")
+
+    with caplog.at_level(logging.WARNING, logger="test"):
+        params = DaytonaEnvironment._network_params(env)
+
+    assert params["network_block_all"] is False
+    assert params["domain_allow_list"].split(",") == sorted(domains)[:DAYTONA_MAX_NETWORK_ALLOWLIST_DOMAINS]
+    assert len([record for record in caplog.records if record.levelno == logging.WARNING]) == 1
 
 
 def test_daytona_compose_keeps_main_network_when_sandbox_allowlist_is_active():
@@ -291,7 +272,6 @@ def test_daytona_direct_start_uses_toolbox_directory_provisioning(monkeypatch):
     env._with_agent_install = lambda image: image
     env._create_sandbox = AsyncMock()
     env._provision_directories = AsyncMock()
-    env._pin_resolved_hosts = AsyncMock()
     env._sandbox_exec = AsyncMock()
     manager = type(
         "Manager",
@@ -308,52 +288,4 @@ def test_daytona_direct_start_uses_toolbox_directory_provisioning(monkeypatch):
 
     env._create_sandbox.assert_awaited_once()
     env._provision_directories.assert_awaited_once_with()
-    env._pin_resolved_hosts.assert_awaited_once_with()
     env._sandbox_exec.assert_not_awaited()
-
-
-def test_daytona_pins_resolved_hosts():
-    env = DaytonaEnvironment.__new__(DaytonaEnvironment)
-    env._compose_mode = False
-    env._network_resolution_debug = {
-        "domain_resolution": {"api.example.com": ["203.0.113.10"]}
-    }
-    captured = {}
-
-    async def sandbox_exec(command, **kwargs):
-        captured["command"] = command
-        captured["kwargs"] = kwargs
-        return type("Result", (), {"return_code": 0, "stdout": "", "stderr": ""})()
-
-    env._sandbox_exec = sandbox_exec
-
-    asyncio.run(DaytonaEnvironment._pin_resolved_hosts(env))
-
-    assert "203.0.113.10 api.example.com" in captured["command"]
-    assert captured["kwargs"]["shell"] == "bash -c"
-
-
-def test_daytona_pins_all_resolved_ips_for_failover():
-    # A domain backed by a rotating frontend pool (e.g. the Gemini API) must pin
-    # EVERY resolved IP, not just the first, so the agent can fail over across
-    # frontends instead of funneling all traffic through one (which triggers
-    # connection resets under many concurrent sandboxes).
-    env = DaytonaEnvironment.__new__(DaytonaEnvironment)
-    env._compose_mode = False
-    ips = ["216.239.32.223", "216.239.34.223", "216.239.36.223", "216.239.38.223"]
-    env._network_resolution_debug = {
-        "domain_resolution": {"generativelanguage.googleapis.com": list(ips)}
-    }
-    captured = {}
-
-    async def sandbox_exec(command, **kwargs):
-        captured["command"] = command
-        return type("Result", (), {"return_code": 0, "stdout": "", "stderr": ""})()
-
-    env._sandbox_exec = sandbox_exec
-    asyncio.run(DaytonaEnvironment._pin_resolved_hosts(env))
-
-    # Every resolved IP is pinned to the host (order is shuffled per sandbox).
-    for ip in ips:
-        assert f"{ip} generativelanguage.googleapis.com" in captured["command"]
-    assert captured["command"].count("generativelanguage.googleapis.com") == len(ips)
