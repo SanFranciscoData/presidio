@@ -77,6 +77,24 @@ def test_advisory_flags():
     assert outcome(" ".join(["word"] * 350), "word_count_advisory") == "pass"
 
 
+def test_excessive_emphasis_flag():
+    assert outcome("**one** and *two* and __three__", "excessive_emphasis") == "pass"
+    assert (
+        outcome(
+            "**one** **two** **three** **four** **five**",
+            "excessive_emphasis",
+        )
+        == "fail"
+    )
+    assert (
+        outcome(
+            "```md\n**one** **two** **three** **four** **five**\n```",
+            "excessive_emphasis",
+        )
+        == "pass"
+    )
+
+
 def test_gate_classification_matches_rubric():
     prompt_rubric = load_rubric(
         __import__("pathlib").Path(

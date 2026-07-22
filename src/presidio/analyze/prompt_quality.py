@@ -37,12 +37,16 @@ PROMPT_QUALITY_GATE_NAMES = {
     "outcome_orientation",
     "absolute_paths",
     "preserve_concrete_requirements",
+    "no_pleasantries",
+    "minimal_styling",
+    "natural_not_procedural",
 }
 PROMPT_QUALITY_FLAG_NAMES = {
     "not_llm_synthesized",
     "realistic_scenario",
     "avoid_bulleted_lists",
     "word_count_advisory",
+    "excessive_emphasis",
 }
 
 
@@ -140,6 +144,28 @@ def _word_count(text: str) -> QualityCheckModel:
     return _result(count <= 350, f"Word count: {count} (advisory limit is 350).")
 
 
+def _emphasis_flag(text: str) -> QualityCheckModel:
+    visible_lines: list[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            visible_lines.append(line)
+    visible_text = "\n".join(visible_lines)
+    spans = re.findall(
+        r"\*\*[^*\n]+\*\*|__[^_\n]+__|(?<!\*)\*(?!\*)[^*\n]+\*(?!\*)|"
+        r"(?<!\w)_(?!_)[^_\n]+(?<!\w)_(?!_)",
+        visible_text,
+    )
+    count = len(spans)
+    return _result(
+        count <= 4,
+        f"Found {count} bold/italic emphasis spans (advisory limit is 4).",
+    )
+
+
 @dataclass(frozen=True)
 class GateSpec:
     name: str
@@ -161,6 +187,7 @@ DETERMINISTIC_GATES = [
     GateSpec("no_relative_paths", True, _no_relative_paths),
     GateSpec("avoid_bulleted_lists", False, _bullet_flag),
     GateSpec("word_count_advisory", False, _word_count),
+    GateSpec("excessive_emphasis", False, _emphasis_flag),
 ]
 
 

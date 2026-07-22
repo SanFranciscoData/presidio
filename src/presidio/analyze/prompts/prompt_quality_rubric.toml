@@ -29,9 +29,24 @@ description = "The prompt does not narrate pre-installed environment or provided
 guidance = "FAIL for environment narration; constraints should be requirements."
 
 [[criteria]]
+name = "no_pleasantries"
+description = "The prompt contains no unnecessary pleasantries or social niceties."
+guidance = "FAIL for gratuitous greetings, please, thanks, kindly, feel free, happy to, hope this helps, or similar politeness. PASS when wording is a neutral task specification and a phrase is genuinely idiomatic or necessary."
+
+[[criteria]]
+name = "minimal_styling"
+description = "The prompt uses Markdown emphasis and styling only when it genuinely aids clarity."
+guidance = "FAIL for gratuitous bold, italic, or decorative emphasis on phrases or sentences. PASS when emphasis is limited to a critical literal or path where it improves clarity."
+
+[[criteria]]
 name = "outcome_orientation"
 description = "The prompt describes what to build and the exact output contract, not how to solve it."
 guidance = "FAIL for solution walkthroughs, suggested algorithms, or solution code."
+
+[[criteria]]
+name = "natural_not_procedural"
+description = "The prompt frames the work as natural prose rather than an enumerated procedural sequence."
+guidance = "FAIL for first/second/third or numbered step-by-step procedural framing that reveals implicit chain-of-thought guardrails. The prompt must retain every requirement and load-bearing literal; judge naturalization of voice, not deletion of constraints."
 
 [[criteria]]
 name = "absolute_paths"
