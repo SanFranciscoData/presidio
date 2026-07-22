@@ -10,4 +10,6 @@ Daytona sandbox contract (`src/presidio/environments/daytona.py`): task
 (never underprovision); every create path applies caller `sandbox_labels`
 plus a `presidio.owner-token` ownership label used for orphan cleanup; 429s
 are retried honoring `Retry-After`; auto-stop/auto-delete default to safe
-nonzero behavior (60 min auto-stop, delete on stop).
+nonzero behavior (60 min auto-stop, delete on stop); allowlist domains,
+including `*.` wildcards, are passed to Daytona's native `domain_allow_list`
+with a 20-entry cap.

@@ -27,8 +27,8 @@ class _EnvEntry(NamedTuple):
 
 
 # Registry of built-in environment types. Modules are imported lazily so optional
-# vendor SDKs are only loaded when that environment is requested. Presidio only ships
-# Docker and Modal; other Presidio environment implementations are not included.
+# vendor SDKs are only loaded when that environment is requested. Presidio ships
+# Docker, Modal, Daytona, and E2B as built-in environment implementations.
 _ENVIRONMENT_REGISTRY: dict[EnvironmentType, _EnvEntry] = {
     EnvironmentType.DOCKER: _EnvEntry(
         "presidio.environments.docker.docker",
