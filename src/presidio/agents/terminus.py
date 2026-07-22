@@ -139,9 +139,7 @@ class PresidioTmuxSession:
             f"Blocking command completed in {time.time() - start_time_sec:.2f}s."
         )
 
-    def _send_non_blocking_keys(
-        self, keys: list[str], min_timeout_sec: float
-    ) -> None:
+    def _send_non_blocking_keys(self, keys: list[str], min_timeout_sec: float) -> None:
         start_time_sec = time.time()
         self._exec(["tmux", "send-keys", "-t", self._session_name, *keys])
         elapsed_time_sec = time.time() - start_time_sec
@@ -298,9 +296,7 @@ class _BaseTerminusAgent(BaseAgent):
             return None
 
         steps = []
-        for step_id, (episode_number, episode_dir) in enumerate(
-            episode_dirs, start=1
-        ):
+        for step_id, (episode_number, episode_dir) in enumerate(episode_dirs, start=1):
             response = self._read_json(episode_dir / "response.json")
             debug = self._read_json(episode_dir / "debug.json")
             message_parts = [
@@ -338,6 +334,34 @@ class _BaseTerminusAgent(BaseAgent):
                 step_kwargs["timestamp"] = timestamp
             steps.append(Step(**step_kwargs))
 
+        prompt_tokens = 0
+        completion_tokens = 0
+        cached_tokens = 0
+        has_metrics = False
+        for step in steps:
+            metrics = step.metrics
+            if metrics is None:
+                continue
+            has_metrics = True
+            if metrics.prompt_tokens is not None:
+                prompt_tokens += metrics.prompt_tokens
+            if metrics.completion_tokens is not None:
+                completion_tokens += metrics.completion_tokens
+            if metrics.cached_tokens is not None:
+                cached_tokens += metrics.cached_tokens
+
+        fallback_prompt_tokens = self._optional_int(
+            getattr(result, "total_input_tokens", None)
+        )
+        fallback_completion_tokens = self._optional_int(
+            getattr(result, "total_output_tokens", None)
+        )
+        total_prompt_tokens = prompt_tokens if has_metrics else fallback_prompt_tokens
+        total_completion_tokens = (
+            completion_tokens if has_metrics else fallback_completion_tokens
+        )
+        total_cached_tokens = cached_tokens if has_metrics else None
+
         return Trajectory(
             schema_version="ATIF-v1.7",
             agent=Agent(
@@ -347,12 +371,9 @@ class _BaseTerminusAgent(BaseAgent):
             ),
             steps=steps,
             final_metrics=FinalMetrics(
-                total_prompt_tokens=self._optional_int(
-                    getattr(result, "total_input_tokens", None)
-                ),
-                total_completion_tokens=self._optional_int(
-                    getattr(result, "total_output_tokens", None)
-                ),
+                total_prompt_tokens=total_prompt_tokens,
+                total_completion_tokens=total_completion_tokens,
+                total_cached_tokens=total_cached_tokens,
                 total_steps=len(steps),
             ),
         )
@@ -395,9 +416,7 @@ class _BaseTerminusAgent(BaseAgent):
             cache_creation_tokens = cls._optional_int(
                 usage.get("cache_creation_input_tokens")
             )
-            cache_read_tokens = cls._optional_int(
-                usage.get("cache_read_input_tokens")
-            )
+            cache_read_tokens = cls._optional_int(usage.get("cache_read_input_tokens"))
             if (
                 input_tokens is None
                 and cache_creation_tokens is None
@@ -440,9 +459,7 @@ class _BaseTerminusAgent(BaseAgent):
             return None
         try:
             trajectory_path = self.logs_dir / "trajectory.json"
-            trajectory_path.write_text(
-                json.dumps(trajectory.to_json_dict(), indent=2)
-            )
+            trajectory_path.write_text(json.dumps(trajectory.to_json_dict(), indent=2))
         except (OSError, TypeError, ValueError):
             self.logger.warning(
                 "Failed to write Terminus ATIF trajectory", exc_info=True
@@ -536,9 +553,7 @@ class TerminusAgent(_BaseTerminusAgent):
 
 
 class Terminus2Agent(_BaseTerminusAgent):
-    def __init__(
-        self, *args: Any, parser_name: str = "json", **kwargs: Any
-    ):
+    def __init__(self, *args: Any, parser_name: str = "json", **kwargs: Any):
         super().__init__(*args, **kwargs)
         self._parser_name = parser_name
 

@@ -107,14 +107,12 @@ def test_build_trajectory_from_episode_logs(tmp_path):
             json.dumps(
                 {
                     "start_time": "2026-01-02T03:04:05",
-                    "original_response": json.dumps(
-                        {"usage": usage}
-                    ),
+                    "original_response": json.dumps({"usage": usage}),
                 }
             )
         )
 
-    result = SimpleNamespace(total_input_tokens=33, total_output_tokens=8)
+    result = SimpleNamespace(total_input_tokens=999, total_output_tokens=888)
     trajectory = agent._write_trajectory(result)
 
     assert trajectory is not None
@@ -125,6 +123,7 @@ def test_build_trajectory_from_episode_logs(tmp_path):
     ]
     assert trajectory.final_metrics.total_prompt_tokens == 33
     assert trajectory.final_metrics.total_completion_tokens == 8
+    assert trajectory.final_metrics.total_cached_tokens == 7
     assert [
         (
             step.metrics.prompt_tokens,
@@ -144,3 +143,51 @@ def test_build_trajectory_from_episode_logs(tmp_path):
         "tokens_out": 8,
     }
     assert (tmp_path / "trajectory.json").exists()
+
+
+def test_build_trajectory_falls_back_to_aggregate_tokens_when_metrics_missing(
+    tmp_path,
+):
+    agent = TerminusAgent(
+        logs_dir=tmp_path,
+        model_name="anthropic/x",
+    )
+    episode_dir = tmp_path / "episode-1"
+    episode_dir.mkdir()
+    (episode_dir / "response.json").write_text(
+        json.dumps(
+            {
+                "state_analysis": "State 1",
+                "explanation": "Explain 1",
+                "commands": [
+                    {
+                        "keystrokes": "pwd\n",
+                        "is_blocking": True,
+                        "timeout_sec": 5.0,
+                    }
+                ],
+            }
+        )
+    )
+    (episode_dir / "debug.json").write_text(
+        json.dumps(
+            {
+                "start_time": "2026-01-02T03:04:05",
+                "original_response": json.dumps({"usage": {}}),
+            }
+        )
+    )
+
+    result = SimpleNamespace(total_input_tokens=12, total_output_tokens=4)
+    trajectory = agent._write_trajectory(result)
+
+    assert trajectory is not None
+    assert trajectory.steps[0].metrics is None
+    assert trajectory.final_metrics.total_prompt_tokens == 12
+    assert trajectory.final_metrics.total_completion_tokens == 4
+    assert trajectory.final_metrics.total_cached_tokens is None
+    serialized = trajectory.to_json_dict()
+    assert _progress_payload(serialized) == {
+        "n_steps": 1,
+        "last_tool": "terminal",
+    }
