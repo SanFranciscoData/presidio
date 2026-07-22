@@ -882,6 +882,8 @@ class DaytonaEnvironment(BaseEnvironment):
         self._daytona_su_warned: set[str] = set()
         self._keepalive_task: asyncio.Task[None] | None = None
         self._client_manager: DaytonaClientManager | None = None
+        self._dockerfile_workdir_cache: str | None = None
+        self._dockerfile_workdir_parsed = False
 
         self._strategy: _DaytonaStrategy = (
             _DaytonaDinD(self) if self._compose_mode else _DaytonaDirect(self)
@@ -1034,17 +1036,57 @@ class DaytonaEnvironment(BaseEnvironment):
         return runtime_user
 
     def _dockerfile_workdir(self) -> str | None:
+        if getattr(self, "_dockerfile_workdir_parsed", False):
+            return self._dockerfile_workdir_cache
+
         workdir: PurePosixPath | None = None
+        variables: dict[str, str] = {}
+        variable_pattern = re.compile(r"\$(?:\{([^}]+)\}|([A-Za-z_][A-Za-z0-9_]*))")
+
+        def expand(value: str) -> str:
+            return variable_pattern.sub(
+                lambda match: variables.get(match.group(1) or match.group(2), ""),
+                value,
+            )
+
         for line in self._dockerfile_path.read_text().splitlines():
             line_without_comment = line.split("#", 1)[0].strip()
+            if re.match(r"(?i)^FROM\s+", line_without_comment):
+                workdir = None
+                variables = {}
+                continue
+
+            match = re.match(r"(?i)^ENV\s+(.+?)\s*$", line_without_comment)
+            if match:
+                try:
+                    env_parts = shlex.split(match.group(1))
+                except ValueError:
+                    continue
+                if not env_parts:
+                    continue
+                if all("=" in part for part in env_parts):
+                    for part in env_parts:
+                        name, value = part.split("=", 1)
+                        variables[name] = expand(value)
+                elif len(env_parts) >= 2:
+                    variables[env_parts[0]] = expand(" ".join(env_parts[1:]))
+                continue
+
+            match = re.match(r"(?i)^ARG\s+([A-Za-z_][A-Za-z0-9_]*)(?:=(.*))?$", line_without_comment)
+            if match:
+                variables[match.group(1)] = expand(match.group(2) or "")
+                continue
+
             match = re.match(r"(?i)^WORKDIR\s+(.+?)\s*$", line_without_comment)
             if not match:
                 continue
-            path = PurePosixPath(match.group(1))
+            path = PurePosixPath(expand(match.group(1)))
             workdir = (
                 path if path.is_absolute() else (workdir or PurePosixPath("/")) / path
             )
-        return str(workdir) if workdir is not None else None
+        self._dockerfile_workdir_cache = str(workdir) if workdir is not None else None
+        self._dockerfile_workdir_parsed = True
+        return self._dockerfile_workdir_cache
 
     @staticmethod
     def _non_root_user(user: str | int | None) -> str | None:
@@ -1654,7 +1696,7 @@ class DaytonaEnvironment(BaseEnvironment):
         user = self._resolve_user(user)
         env = self._merge_env(env)
         effective_cwd = cwd or self.task_env_config.workdir
-        if effective_cwd is None and not self._compose_mode:
+        if not effective_cwd and not self._compose_mode:
             effective_cwd = self._dockerfile_workdir() or "/"
         return await self._strategy.exec(
             command,

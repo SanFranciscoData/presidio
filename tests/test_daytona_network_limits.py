@@ -197,6 +197,45 @@ def test_daytona_exec_uses_dockerfile_workdir_when_unset(
     assert env._strategy.exec.await_args.kwargs["cwd"] == expected_cwd
 
 
+def test_daytona_dockerfile_workdir_expands_env_and_arg_variables(tmp_path):
+    env = DaytonaEnvironment.__new__(DaytonaEnvironment)
+    env.environment_dir = tmp_path
+    (tmp_path / "Dockerfile").write_text(
+        "FROM alpine\n"
+        "ARG APP_HOME=/workspace\n"
+        "ENV SOURCE_DIR=src\n"
+        "WORKDIR $APP_HOME\n"
+        "WORKDIR ${SOURCE_DIR}/$UNDECLARED\n"
+    )
+
+    assert env._dockerfile_workdir() == "/workspace/src"
+
+
+def test_daytona_dockerfile_workdir_resets_between_stages(tmp_path):
+    env = DaytonaEnvironment.__new__(DaytonaEnvironment)
+    env.environment_dir = tmp_path
+    (tmp_path / "Dockerfile").write_text(
+        "FROM alpine AS builder\n"
+        "WORKDIR /builder\n"
+        "FROM alpine\n"
+        "WORKDIR /app\n"
+        "WORKDIR source\n"
+    )
+
+    assert env._dockerfile_workdir() == "/app/source"
+
+
+def test_daytona_exec_empty_workdir_uses_dockerfile_workdir(tmp_path):
+    env = _reset_test_env(compose_mode=False, default_user=None)
+    env.environment_dir = tmp_path
+    env.task_env_config.workdir = ""
+    (tmp_path / "Dockerfile").write_text("FROM alpine\nWORKDIR /app\n")
+
+    asyncio.run(env.exec("echo ready"))
+
+    assert env._strategy.exec.await_args.kwargs["cwd"] == "/app"
+
+
 def test_daytona_exec_preserves_explicit_workdir_and_cwd(tmp_path):
     env = _reset_test_env(compose_mode=False, default_user=None)
     env.environment_dir = tmp_path
