@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from pathlib import Path
 from unittest.mock import AsyncMock, call
 
 import pytest
@@ -121,7 +122,9 @@ def test_daytona_compose_resets_directories_as_root():
 def _reset_test_env(*, compose_mode: bool, default_user: str | None):
     env = DaytonaEnvironment.__new__(DaytonaEnvironment)
     env._compose_mode = compose_mode
-    env._direct_image_built_from_dockerfile = True
+    env._daytona_captured_workdir_cache = None
+    env._daytona_captured_workdir_resolved = False
+    env._daytona_captured_workdir_lock = asyncio.Lock()
     env._persistent_env = {}
     env.default_user = default_user
     env.task_env_config = type(
@@ -136,6 +139,24 @@ def _reset_test_env(*, compose_mode: bool, default_user: str | None):
         {"exec": AsyncMock(return_value=result)},
     )()
     return env
+
+
+def _stub_captured_workdir(
+    env, value: str | None = None, error: Exception | None = None
+):
+    async def download_file(_source_path: str, target_path: str):
+        if error is not None:
+            raise error
+        if value is not None:
+            Path(target_path).write_text(value)
+
+    download_file_mock = AsyncMock(side_effect=download_file)
+    env._sandbox = type(
+        "Sandbox",
+        (),
+        {"fs": type("FileSystem", (), {"download_file": download_file_mock})()},
+    )()
+    return download_file_mock
 
 
 def test_daytona_direct_reset_bypasses_default_user():
@@ -178,87 +199,74 @@ def test_daytona_exec_without_user_uses_default_user(tmp_path):
     assert env._strategy.exec.await_args.kwargs["user"] == "root"
 
 
-@pytest.mark.parametrize(
-    ("dockerfile", "expected_cwd"),
-    [
-        ("FROM alpine\n", "/"),
-        ("FROM alpine\nWORKDIR /app\n", "/app"),
-        ("FROM alpine\nWORKDIR /app\nWORKDIR data\n", "/app/data"),
-    ],
-)
-def test_daytona_exec_uses_dockerfile_workdir_when_unset(
-    tmp_path, dockerfile, expected_cwd
-):
+def test_daytona_exec_uses_captured_workdir_when_unset():
     env = _reset_test_env(compose_mode=False, default_user=None)
-    env.environment_dir = tmp_path
-    (tmp_path / "Dockerfile").write_text(dockerfile)
-
-    asyncio.run(env.exec("echo ready"))
-
-    assert env._strategy.exec.await_args.kwargs["cwd"] == expected_cwd
-
-
-def test_daytona_dockerfile_workdir_expands_env_and_arg_variables(tmp_path):
-    env = DaytonaEnvironment.__new__(DaytonaEnvironment)
-    env.environment_dir = tmp_path
-    (tmp_path / "Dockerfile").write_text(
-        "FROM alpine\n"
-        "ARG APP_HOME=/workspace\n"
-        "ENV SOURCE_DIR=src\n"
-        "WORKDIR $APP_HOME\n"
-        "WORKDIR ${SOURCE_DIR}/$UNDECLARED\n"
-    )
-
-    assert env._dockerfile_workdir() == "/workspace/src"
-
-
-def test_daytona_dockerfile_workdir_resets_between_stages(tmp_path):
-    env = DaytonaEnvironment.__new__(DaytonaEnvironment)
-    env.environment_dir = tmp_path
-    (tmp_path / "Dockerfile").write_text(
-        "FROM alpine AS builder\n"
-        "WORKDIR /builder\n"
-        "FROM alpine\n"
-        "WORKDIR /app\n"
-        "WORKDIR source\n"
-    )
-
-    assert env._dockerfile_workdir() == "/app/source"
-
-
-def test_daytona_exec_empty_workdir_uses_dockerfile_workdir(tmp_path):
-    env = _reset_test_env(compose_mode=False, default_user=None)
-    env.environment_dir = tmp_path
-    env.task_env_config.workdir = ""
-    (tmp_path / "Dockerfile").write_text("FROM alpine\nWORKDIR /app\n")
+    _stub_captured_workdir(env, "/app")
 
     asyncio.run(env.exec("echo ready"))
 
     assert env._strategy.exec.await_args.kwargs["cwd"] == "/app"
 
 
-def test_daytona_exec_prebuilt_image_ignores_dockerfile_workdir(tmp_path):
+@pytest.mark.parametrize(
+    ("value", "error"),
+    [
+        ("", None),
+        (None, FileNotFoundError("missing")),
+        (None, RuntimeError("failed")),
+    ],
+)
+def test_daytona_exec_falls_back_when_captured_workdir_unavailable(value, error):
     env = _reset_test_env(compose_mode=False, default_user=None)
-    env._direct_image_built_from_dockerfile = False
-    env.environment_dir = tmp_path
-    (tmp_path / "Dockerfile").write_text("FROM alpine\nWORKDIR /app\n")
+    _stub_captured_workdir(env, value, error)
 
     asyncio.run(env.exec("echo ready"))
 
     assert env._strategy.exec.await_args.kwargs["cwd"] == "/"
 
 
-def test_daytona_exec_preserves_explicit_workdir_and_cwd(tmp_path):
+def test_daytona_exec_caches_captured_workdir():
     env = _reset_test_env(compose_mode=False, default_user=None)
-    env.environment_dir = tmp_path
-    (tmp_path / "Dockerfile").write_text("FROM alpine\nWORKDIR /app\n")
+    download_file = _stub_captured_workdir(env, "/app")
+
+    asyncio.run(env.exec("echo ready"))
+    asyncio.run(env.exec("echo ready"))
+
+    assert download_file.await_count == 1
+    assert env._strategy.exec.await_args.kwargs["cwd"] == "/app"
+
+
+def test_daytona_exec_empty_workdir_uses_captured_workdir():
+    env = _reset_test_env(compose_mode=False, default_user=None)
+    env.task_env_config.workdir = ""
+    _stub_captured_workdir(env, "/app")
+
+    asyncio.run(env.exec("echo ready"))
+
+    assert env._strategy.exec.await_args.kwargs["cwd"] == "/app"
+
+
+def test_daytona_exec_preserves_explicit_workdir_and_cwd():
+    env = _reset_test_env(compose_mode=False, default_user=None)
+    download_file = _stub_captured_workdir(env, "/app")
 
     asyncio.run(env.exec("echo ready", cwd="/tmp"))
     assert env._strategy.exec.await_args.kwargs["cwd"] == "/tmp"
+    assert download_file.await_count == 0
 
     env.task_env_config.workdir = "/workspace"
     asyncio.run(env.exec("echo ready"))
     assert env._strategy.exec.await_args.kwargs["cwd"] == "/workspace"
+
+
+def test_daytona_compose_exec_does_not_use_captured_workdir():
+    env = _reset_test_env(compose_mode=True, default_user=None)
+    download_file = _stub_captured_workdir(env, "/app")
+
+    asyncio.run(env.exec("echo ready"))
+
+    assert env._strategy.exec.await_args.kwargs["cwd"] is None
+    assert download_file.await_count == 0
 
 
 def test_daytona_compose_reset_keeps_root_user():

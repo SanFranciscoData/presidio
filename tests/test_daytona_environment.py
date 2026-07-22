@@ -414,7 +414,9 @@ def test_daytona_directory_layer_restores_dockerfile_user(tmp_path):
     # restored run user so the agent cannot tamper with them (anti-cheat).
     assert (
         "RUN mkdir -p /logs /logs/agent /logs/verifier /logs/artifacts "
-        "/tests /solution && chmod -R 0777 /logs && chmod 0755 /tests /solution "
+        "/tests /solution /etc/presidio && chmod -R 0777 /logs "
+        "&& chmod 0755 /tests /solution "
+        "&& printf '%s' \"$PWD\" > /etc/presidio/workdir "
         "&& chown user /tests /solution"
     ) in dockerfile
     assert "chmod -R 777 /logs /tests /solution" not in dockerfile

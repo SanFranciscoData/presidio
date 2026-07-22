@@ -74,6 +74,7 @@ _SandboxParams = Union[
 ]
 
 DAYTONA_MAX_NETWORK_ALLOWLIST_DOMAINS = 20
+DAYTONA_WORKDIR_CAPTURE_PATH = "/etc/presidio/workdir"
 DAYTONA_OWNER_LABEL = "presidio.owner-token"
 DAYTONA_DEFAULT_AUTO_STOP_INTERVAL_MINS = 60
 DAYTONA_DEFAULT_AUTO_DELETE_INTERVAL_MINS = 0
@@ -305,13 +306,11 @@ class _DaytonaDirect(_DaytonaStrategy):
 
         params: _SandboxParams
         if snapshot_exists and snapshot_name:
-            env._direct_image_built_from_dockerfile = False
             params = CreateSandboxFromSnapshotParams(
                 snapshot=snapshot_name,
                 **env._base_sandbox_params(),
             )
         elif force_build or not env.task_env_config.docker_image:
-            env._direct_image_built_from_dockerfile = True
             runtime_user = env._dockerfile_runtime_user()
             image = env._with_agent_install(Image.from_dockerfile(env._dockerfile_path))
             image = env._with_daytona_directory_layer(image, runtime_user=runtime_user)
@@ -325,7 +324,6 @@ class _DaytonaDirect(_DaytonaStrategy):
                 **kwargs,
             )
         else:
-            env._direct_image_built_from_dockerfile = False
             image = env._with_agent_install(
                 Image.base(env.task_env_config.docker_image)
             )
@@ -885,9 +883,9 @@ class DaytonaEnvironment(BaseEnvironment):
         self._daytona_su_warned: set[str] = set()
         self._keepalive_task: asyncio.Task[None] | None = None
         self._client_manager: DaytonaClientManager | None = None
-        self._direct_image_built_from_dockerfile = True
-        self._dockerfile_workdir_cache: str | None = None
-        self._dockerfile_workdir_parsed = False
+        self._daytona_captured_workdir_cache: str | None = None
+        self._daytona_captured_workdir_resolved = False
+        self._daytona_captured_workdir_lock = asyncio.Lock()
 
         self._strategy: _DaytonaStrategy = (
             _DaytonaDinD(self) if self._compose_mode else _DaytonaDirect(self)
@@ -1039,59 +1037,6 @@ class DaytonaEnvironment(BaseEnvironment):
                 runtime_user = match.group(1)
         return runtime_user
 
-    def _dockerfile_workdir(self) -> str | None:
-        if getattr(self, "_dockerfile_workdir_parsed", False):
-            return self._dockerfile_workdir_cache
-
-        workdir: PurePosixPath | None = None
-        variables: dict[str, str] = {}
-        variable_pattern = re.compile(r"\$(?:\{([^}]+)\}|([A-Za-z_][A-Za-z0-9_]*))")
-
-        def expand(value: str) -> str:
-            return variable_pattern.sub(
-                lambda match: variables.get(match.group(1) or match.group(2), ""),
-                value,
-            )
-
-        for line in self._dockerfile_path.read_text().splitlines():
-            line_without_comment = line.split("#", 1)[0].strip()
-            if re.match(r"(?i)^FROM\s+", line_without_comment):
-                workdir = None
-                variables = {}
-                continue
-
-            match = re.match(r"(?i)^ENV\s+(.+?)\s*$", line_without_comment)
-            if match:
-                try:
-                    env_parts = shlex.split(match.group(1))
-                except ValueError:
-                    continue
-                if not env_parts:
-                    continue
-                if all("=" in part for part in env_parts):
-                    for part in env_parts:
-                        name, value = part.split("=", 1)
-                        variables[name] = expand(value)
-                elif len(env_parts) >= 2:
-                    variables[env_parts[0]] = expand(" ".join(env_parts[1:]))
-                continue
-
-            match = re.match(r"(?i)^ARG\s+([A-Za-z_][A-Za-z0-9_]*)(?:=(.*))?$", line_without_comment)
-            if match:
-                variables[match.group(1)] = expand(match.group(2) or "")
-                continue
-
-            match = re.match(r"(?i)^WORKDIR\s+(.+?)\s*$", line_without_comment)
-            if not match:
-                continue
-            path = PurePosixPath(expand(match.group(1)))
-            workdir = (
-                path if path.is_absolute() else (workdir or PurePosixPath("/")) / path
-            )
-        self._dockerfile_workdir_cache = str(workdir) if workdir is not None else None
-        self._dockerfile_workdir_parsed = True
-        return self._dockerfile_workdir_cache
-
     @staticmethod
     def _non_root_user(user: str | int | None) -> str | None:
         if user is None:
@@ -1122,7 +1067,9 @@ class DaytonaEnvironment(BaseEnvironment):
         restore_user = self._non_root_user(runtime_user)
         setup = (
             "mkdir -p /logs /logs/agent /logs/verifier /logs/artifacts "
-            "/tests /solution && chmod -R 0777 /logs && chmod 0755 /tests /solution"
+            "/tests /solution /etc/presidio && chmod -R 0777 /logs "
+            "&& chmod 0755 /tests /solution "
+            f"&& printf '%s' \"$PWD\" > {DAYTONA_WORKDIR_CAPTURE_PATH}"
         )
         if restore_user:
             setup += f" && chown {restore_user} /tests /solution"
@@ -1686,6 +1633,31 @@ class DaytonaEnvironment(BaseEnvironment):
     async def start(self, force_build: bool) -> None:
         return await self._strategy.start(force_build)
 
+    async def _captured_workdir(self) -> str:
+        if self._daytona_captured_workdir_resolved:
+            return self._daytona_captured_workdir_cache or "/"
+
+        async with self._daytona_captured_workdir_lock:
+            if self._daytona_captured_workdir_resolved:
+                return self._daytona_captured_workdir_cache or "/"
+
+            workdir = "/"
+            try:
+                if self._sandbox is not None:
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        target = Path(temp_dir) / "workdir"
+                        await self._sandbox.fs.download_file(
+                            DAYTONA_WORKDIR_CAPTURE_PATH,
+                            str(target),
+                        )
+                        workdir = target.read_text().strip() or "/"
+            except Exception:
+                workdir = "/"
+
+            self._daytona_captured_workdir_cache = workdir
+            self._daytona_captured_workdir_resolved = True
+            return workdir
+
     async def stop(self, delete: bool) -> None:
         return await self._strategy.stop(delete)
 
@@ -1701,10 +1673,7 @@ class DaytonaEnvironment(BaseEnvironment):
         env = self._merge_env(env)
         effective_cwd = cwd or self.task_env_config.workdir
         if not effective_cwd and not self._compose_mode:
-            if self._direct_image_built_from_dockerfile:
-                effective_cwd = self._dockerfile_workdir() or "/"
-            else:
-                effective_cwd = "/"
+            effective_cwd = await self._captured_workdir()
         return await self._strategy.exec(
             command,
             cwd=effective_cwd,
