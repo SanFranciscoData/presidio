@@ -1033,6 +1033,19 @@ class DaytonaEnvironment(BaseEnvironment):
                 runtime_user = match.group(1)
         return runtime_user
 
+    def _dockerfile_workdir(self) -> str | None:
+        workdir: PurePosixPath | None = None
+        for line in self._dockerfile_path.read_text().splitlines():
+            line_without_comment = line.split("#", 1)[0].strip()
+            match = re.match(r"(?i)^WORKDIR\s+(.+?)\s*$", line_without_comment)
+            if not match:
+                continue
+            path = PurePosixPath(match.group(1))
+            workdir = (
+                path if path.is_absolute() else (workdir or PurePosixPath("/")) / path
+            )
+        return str(workdir) if workdir is not None else None
+
     @staticmethod
     def _non_root_user(user: str | int | None) -> str | None:
         if user is None:
@@ -1641,6 +1654,8 @@ class DaytonaEnvironment(BaseEnvironment):
         user = self._resolve_user(user)
         env = self._merge_env(env)
         effective_cwd = cwd or self.task_env_config.workdir
+        if effective_cwd is None and not self._compose_mode:
+            effective_cwd = self._dockerfile_workdir() or "/"
         return await self._strategy.exec(
             command,
             cwd=effective_cwd,

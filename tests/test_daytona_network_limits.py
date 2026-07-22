@@ -167,12 +167,47 @@ def test_daytona_direct_reset_preserves_root_directory_entries():
     assert "rm -rf /tests" not in command
 
 
-def test_daytona_exec_without_user_uses_default_user():
+def test_daytona_exec_without_user_uses_default_user(tmp_path):
     env = _reset_test_env(compose_mode=False, default_user="root")
+    env.environment_dir = tmp_path
+    (tmp_path / "Dockerfile").write_text("FROM alpine\n")
 
     asyncio.run(env.exec("echo ready"))
 
     assert env._strategy.exec.await_args.kwargs["user"] == "root"
+
+
+@pytest.mark.parametrize(
+    ("dockerfile", "expected_cwd"),
+    [
+        ("FROM alpine\n", "/"),
+        ("FROM alpine\nWORKDIR /app\n", "/app"),
+        ("FROM alpine\nWORKDIR /app\nWORKDIR data\n", "/app/data"),
+    ],
+)
+def test_daytona_exec_uses_dockerfile_workdir_when_unset(
+    tmp_path, dockerfile, expected_cwd
+):
+    env = _reset_test_env(compose_mode=False, default_user=None)
+    env.environment_dir = tmp_path
+    (tmp_path / "Dockerfile").write_text(dockerfile)
+
+    asyncio.run(env.exec("echo ready"))
+
+    assert env._strategy.exec.await_args.kwargs["cwd"] == expected_cwd
+
+
+def test_daytona_exec_preserves_explicit_workdir_and_cwd(tmp_path):
+    env = _reset_test_env(compose_mode=False, default_user=None)
+    env.environment_dir = tmp_path
+    (tmp_path / "Dockerfile").write_text("FROM alpine\nWORKDIR /app\n")
+
+    asyncio.run(env.exec("echo ready", cwd="/tmp"))
+    assert env._strategy.exec.await_args.kwargs["cwd"] == "/tmp"
+
+    env.task_env_config.workdir = "/workspace"
+    asyncio.run(env.exec("echo ready"))
+    assert env._strategy.exec.await_args.kwargs["cwd"] == "/workspace"
 
 
 def test_daytona_compose_reset_keeps_root_user():
