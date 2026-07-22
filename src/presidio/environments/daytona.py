@@ -74,6 +74,7 @@ _SandboxParams = Union[
 ]
 
 DAYTONA_MAX_NETWORK_ALLOWLIST_DOMAINS = 20
+DAYTONA_WORKDIR_CAPTURE_PATH = "/etc/presidio/workdir"
 DAYTONA_OWNER_LABEL = "presidio.owner-token"
 DAYTONA_DEFAULT_AUTO_STOP_INTERVAL_MINS = 60
 DAYTONA_DEFAULT_AUTO_DELETE_INTERVAL_MINS = 0
@@ -882,6 +883,9 @@ class DaytonaEnvironment(BaseEnvironment):
         self._daytona_su_warned: set[str] = set()
         self._keepalive_task: asyncio.Task[None] | None = None
         self._client_manager: DaytonaClientManager | None = None
+        self._daytona_captured_workdir_cache: str | None = None
+        self._daytona_captured_workdir_resolved = False
+        self._daytona_captured_workdir_lock = asyncio.Lock()
 
         self._strategy: _DaytonaStrategy = (
             _DaytonaDinD(self) if self._compose_mode else _DaytonaDirect(self)
@@ -1063,7 +1067,9 @@ class DaytonaEnvironment(BaseEnvironment):
         restore_user = self._non_root_user(runtime_user)
         setup = (
             "mkdir -p /logs /logs/agent /logs/verifier /logs/artifacts "
-            "/tests /solution && chmod -R 0777 /logs && chmod 0755 /tests /solution"
+            "/tests /solution /etc/presidio && chmod -R 0777 /logs "
+            "&& chmod 0755 /tests /solution "
+            f"&& printf '%s' \"$(pwd)\" > {DAYTONA_WORKDIR_CAPTURE_PATH}"
         )
         if restore_user:
             setup += f" && chown {restore_user} /tests /solution"
@@ -1627,6 +1633,31 @@ class DaytonaEnvironment(BaseEnvironment):
     async def start(self, force_build: bool) -> None:
         return await self._strategy.start(force_build)
 
+    async def _captured_workdir(self) -> str:
+        if self._daytona_captured_workdir_resolved:
+            return self._daytona_captured_workdir_cache or "/"
+
+        async with self._daytona_captured_workdir_lock:
+            if self._daytona_captured_workdir_resolved:
+                return self._daytona_captured_workdir_cache or "/"
+
+            workdir = "/"
+            try:
+                if self._sandbox is not None:
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        target = Path(temp_dir) / "workdir"
+                        await self._sandbox.fs.download_file(
+                            DAYTONA_WORKDIR_CAPTURE_PATH,
+                            str(target),
+                        )
+                        workdir = target.read_text().strip() or "/"
+            except Exception:
+                workdir = "/"
+
+            self._daytona_captured_workdir_cache = workdir
+            self._daytona_captured_workdir_resolved = True
+            return workdir
+
     async def stop(self, delete: bool) -> None:
         return await self._strategy.stop(delete)
 
@@ -1641,6 +1672,8 @@ class DaytonaEnvironment(BaseEnvironment):
         user = self._resolve_user(user)
         env = self._merge_env(env)
         effective_cwd = cwd or self.task_env_config.workdir
+        if not effective_cwd and not self._compose_mode:
+            effective_cwd = await self._captured_workdir()
         return await self._strategy.exec(
             command,
             cwd=effective_cwd,
