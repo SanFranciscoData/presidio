@@ -1,0 +1,54 @@
+[[criteria]]
+name = "no_persona_opener"
+description = "The prompt does not open with a persona self-introduction."
+guidance = "PASS unless the prompt starts with a conversational persona opener such as Hi! I'm a X researcher."
+
+[[criteria]]
+name = "no_signoff"
+description = "The prompt has no conversational sign-off."
+guidance = "FAIL for sign-offs such as Let me know when you're done or tell me once implemented."
+
+[[criteria]]
+name = "no_suggestive_language"
+description = "The prompt avoids flattery and process nudges."
+guidance = "FAIL for role-play flattery or nudges such as think step by step, carefully, or make sure to."
+
+[[criteria]]
+name = "no_eval_leakage"
+description = "The prompt does not reveal that the agent is tested, graded, benchmarked, or evaluated."
+guidance = "FAIL for fourth-wall evaluation language."
+
+[[criteria]]
+name = "no_verifier_description"
+description = "The prompt does not describe a verifier, harness, or grading mechanism."
+guidance = "FAIL for verifier/test harness descriptions; judge the user-facing contract instead."
+
+[[criteria]]
+name = "no_environment_narration"
+description = "The prompt does not narrate pre-installed environment or provided tooling."
+guidance = "FAIL for environment narration; constraints should be requirements."
+
+[[criteria]]
+name = "outcome_orientation"
+description = "The prompt describes what to build and the exact output contract, not how to solve it."
+guidance = "FAIL for solution walkthroughs, suggested algorithms, or solution code."
+
+[[criteria]]
+name = "absolute_paths"
+description = "Every file and directory path in the prompt is absolute."
+guidance = "Read instruction.md and judge path references, allowing ordinary prose that is not a path."
+
+[[criteria]]
+name = "preserve_concrete_requirements"
+description = "The prompt preserves every load-bearing literal required by tests and solution."
+guidance = "Read tests/ and solution/. Fail when instruction.md omits absolute paths, filenames, ports, formats, numeric values, entry points, or must/must-not rules on which tests depend."
+
+[[criteria]]
+name = "not_llm_synthesized"
+description = "The prompt is concise and plausibly written by a human."
+guidance = "FAIL for padding, restated context, or redundant enumeration."
+
+[[criteria]]
+name = "realistic_scenario"
+description = "The task presents an industrial-grade real-world scenario."
+guidance = "FAIL for toy, algorithmic-competition, exam, or demo-style framing."

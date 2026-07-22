@@ -46,6 +46,31 @@ def _render_checks_table(title: str, checks: dict, summary: str | None = None):
     console.print(table)
 
 
+def _render_prompt_checks_table(checks: dict):
+    """Render prompt checks, distinguishing advisory flags from gates."""
+    from presidio.analyze.prompt_quality import PROMPT_QUALITY_GATE_NAMES
+
+    table = Table(title="Prompt Quality", show_lines=True)
+    table.add_column("Check")
+    table.add_column("Outcome")
+    table.add_column("Explanation")
+    for name, check in checks.items():
+        outcome, explanation = _outcome_str(check)
+        is_gate = name in PROMPT_QUALITY_GATE_NAMES
+        display_name = name.replace("_", " ").title()
+        if not is_gate:
+            display_name = f"⚑ {display_name} (flag)"
+        table.add_row(
+            display_name,
+            outcome,
+            explanation,
+            style=_OUTCOME_STYLES.get(outcome, "white")
+            if is_gate
+            else ("yellow" if outcome == "fail" else "white"),
+        )
+    console.print(table)
+
+
 def _is_trial_dir(path: Path) -> bool:
     return (path / "trial.log").exists()
 
@@ -69,6 +94,12 @@ def check_command(
         help="Prompt file with instructions for the evaluator agent. Uses built-in default if not specified.",
     ),
     model: str = typer.Option("sonnet", "-m", "--model", help="Model to use"),
+    fix: bool = typer.Option(
+        False, "--fix/--no-fix", help="Repair prompt quality gate failures"
+    ),
+    fix_rounds: int = typer.Option(
+        3, "--fix-rounds", help="Maximum prompt repair rounds"
+    ),
     verbose: bool = typer.Option(False, "-v", "--verbose", help="Show agent trace"),
     output: Path | None = typer.Option(
         None, "-o", "--output", help="Write JSON output to file"
@@ -76,6 +107,7 @@ def check_command(
 ):
     """Check task quality against a rubric."""
     from presidio.analyze.checker import run_check
+    from presidio.analyze.prompt_quality import clean_prompt, run_prompt_quality_check
 
     console.print("\n[blue]🔎 Checking task quality...[/blue]")
 
@@ -93,11 +125,39 @@ def check_command(
         console.print(f"[red]❌ {e}[/red]")
         raise typer.Exit(1)
 
-    if output:
-        output.write_text(json.dumps(result.model_dump(), indent=2))
-        console.print(f"[green]✓ Results written to {output}[/green]")
-
     _render_checks_table("Task Quality Checks", result.checks)
+
+    try:
+        if fix:
+            prompt_result, rounds, changed = run_async(
+                clean_prompt(
+                    task_dir=task_dir,
+                    model=model,
+                    max_rounds=fix_rounds,
+                    verbose=verbose,
+                )
+            )
+            console.print(
+                f"[blue]Prompt fixer used {rounds} round(s); "
+                f"instruction files changed: {'yes' if changed else 'no'}[/blue]"
+            )
+        else:
+            prompt_result = run_async(
+                run_prompt_quality_check(
+                    task_dir=task_dir, model=model, verbose=verbose
+                )
+            )
+    except (FileNotFoundError, ValueError, RuntimeError) as e:
+        console.print(f"[red]❌ {e}[/red]")
+        raise typer.Exit(1)
+
+    _render_prompt_checks_table(prompt_result.checks)
+
+    if output:
+        payload = result.model_dump()
+        payload["prompt_quality"] = prompt_result.model_dump()
+        output.write_text(json.dumps(payload, indent=2))
+        console.print(f"[green]✓ Results written to {output}[/green]")
 
 
 def analyze_command(
