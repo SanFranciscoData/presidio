@@ -416,7 +416,7 @@ def test_daytona_directory_layer_restores_dockerfile_user(tmp_path):
         "RUN mkdir -p /logs /logs/agent /logs/verifier /logs/artifacts "
         "/tests /solution /etc/presidio && chmod -R 0777 /logs "
         "&& chmod 0755 /tests /solution "
-        "&& printf '%s' \"$PWD\" > /etc/presidio/workdir "
+        "&& printf '%s' \"$(pwd)\" > /etc/presidio/workdir "
         "&& chown user /tests /solution"
     ) in dockerfile
     assert "chmod -R 777 /logs /tests /solution" not in dockerfile

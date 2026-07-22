@@ -1069,7 +1069,7 @@ class DaytonaEnvironment(BaseEnvironment):
             "mkdir -p /logs /logs/agent /logs/verifier /logs/artifacts "
             "/tests /solution /etc/presidio && chmod -R 0777 /logs "
             "&& chmod 0755 /tests /solution "
-            f"&& printf '%s' \"$PWD\" > {DAYTONA_WORKDIR_CAPTURE_PATH}"
+            f"&& printf '%s' \"$(pwd)\" > {DAYTONA_WORKDIR_CAPTURE_PATH}"
         )
         if restore_user:
             setup += f" && chown {restore_user} /tests /solution"
