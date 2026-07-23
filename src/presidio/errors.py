@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import re
 from enum import Enum
 
 
@@ -9,10 +12,25 @@ from enum import Enum
 # provider_quota rather than provider_transient.
 CAPACITY_LIMIT_MARKERS = ("limit exceeded",)
 
+MODEL_NOT_FOUND_MARKERS = (
+    "not found for api version",
+    "model not found",
+    "modelnotfounderror",
+    "is not found",
+    "unknown model",
+    "does not exist",
+    "not supported for generatecontent",
+)
 
-def message_matches_markers(message: str, markers: tuple[str, ...]) -> bool:
-    lowered = message.lower()
-    return any(marker in lowered for marker in markers)
+CREDENTIAL_MARKERS = (
+    "api key not valid",
+    "invalid api key",
+    "api_key_invalid",
+    "permission denied",
+    "permission_denied",
+    "unauthorized",
+    "authenticationerror",
+)
 
 
 class ErrorClass(str, Enum):
@@ -33,10 +51,44 @@ class MissingCredentialError(ValueError):
     pass
 
 
+class EgressMisconfigError(ValueError):
+    pass
+
+
 def _matching_classes(
     *classes: type[BaseException] | None,
 ) -> tuple[type[BaseException], ...]:
     return tuple(cls for cls in classes if cls is not None)
+
+
+def _candidate_messages(exc: BaseException) -> tuple[str, ...]:
+    message = str(exc)
+    if type(exc).__name__ != "NonZeroAgentExitCodeError":
+        return (message,)
+
+    candidates: list[str] = []
+    stdout_match = re.search(
+        r"(?ms)^stdout:\s*(.*?)(?:^stderr:\s*|\Z)",
+        message,
+    )
+    if stdout_match:
+        stdout = stdout_match.group(1).strip()
+        if stdout and stdout.lower() != "none":
+            candidates.append(stdout)
+
+    stderr_match = re.search(r"(?ms)^stderr:\s*(.*)$", message)
+    if stderr_match:
+        stderr = stderr_match.group(1).strip()
+        if stderr and stderr.lower() != "none":
+            candidates.append(stderr)
+
+    candidates.append(message)
+    return tuple(candidates)
+
+
+def message_matches_markers(message: str, markers: tuple[str, ...]) -> bool:
+    lowered = message.lower()
+    return any(marker in lowered for marker in markers)
 
 
 def classify(exc: BaseException) -> ErrorClass:
@@ -92,6 +144,11 @@ def classify(exc: BaseException) -> ErrorClass:
             {"InvalidModelError", "MissingCredentialError"},
         ),
         (
+            ErrorClass.EGRESS_MISCONFIG,
+            (EgressMisconfigError,),
+            {"EgressMisconfigError"},
+        ),
+        (
             ErrorClass.PROVIDER_TRANSIENT,
             _matching_classes(
                 DaytonaNotFoundError,
@@ -139,6 +196,14 @@ def classify(exc: BaseException) -> ErrorClass:
     )
 
     for error_class, classes, names in rules:
-        if isinstance(exc, classes) or type(exc).__name__ in names:
-            return error_class
+        if not (isinstance(exc, classes) or type(exc).__name__ in names):
+            continue
+        if type(exc).__name__ == "NonZeroAgentExitCodeError":
+            for candidate in _candidate_messages(exc):
+                if message_matches_markers(
+                    candidate,
+                    MODEL_NOT_FOUND_MARKERS + CREDENTIAL_MARKERS,
+                ):
+                    return ErrorClass.CONFIG_FATAL
+        return error_class
     return ErrorClass.UNKNOWN
