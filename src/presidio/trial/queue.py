@@ -1,13 +1,17 @@
 import asyncio
+import hashlib
+import json
 import shutil
 from collections.abc import Coroutine
+from datetime import datetime, timezone
 from typing import Any
 
-from presidio.errors import ErrorClass
+from presidio.errors import ErrorClass, InvalidModelError
 from presidio.models.job.config import RetryConfig
 from presidio.models.trial.config import TrialConfig
-from presidio.models.trial.result import TrialResult
-from presidio.trial.hooks import HookCallback, TrialEvent
+from presidio.models.trial.paths import TrialPaths
+from presidio.models.trial.result import AgentInfo, ExceptionInfo, ModelInfo, TrialResult
+from presidio.trial.hooks import HookCallback, TrialEvent, TrialHookEvent
 from presidio.utils.logger import logger
 
 
@@ -26,6 +30,7 @@ class TrialQueue:
         n_concurrent: int,
         retry_config: RetryConfig | None = None,
         hooks: dict[TrialEvent, list[HookCallback]] | None = None,
+        fail_fast: bool = True,
     ):
         if hooks is None:
             hooks = {event: [] for event in TrialEvent}
@@ -36,8 +41,12 @@ class TrialQueue:
         self._n_concurrent = n_concurrent
         self._retry_config = retry_config if retry_config is not None else RetryConfig()
         self._hooks = hooks
+        self._fail_fast = fail_fast
         self._logger = logger.getChild(__name__)
         self._semaphore = asyncio.Semaphore(n_concurrent)
+        self._cohort_outcomes: dict[str, list[ErrorClass | None]] = {}
+        self._poisoned_cohorts: set[str] = set()
+        self._pending_by_cohort: dict[str, int] = {}
 
     def add_hook(self, event: TrialEvent, callback: HookCallback) -> "TrialQueue":
         """Register a callback for a trial lifecycle event and return the queue."""
@@ -129,6 +138,93 @@ class TrialQueue:
             for hook in hooks:
                 trial.add_hook(event, hook)
 
+    @staticmethod
+    def cohort_key(trial_config: TrialConfig) -> str:
+        agent = getattr(trial_config, "agent", None)
+        payload = agent.model_dump(mode="json") if agent is not None else {}
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode()).hexdigest()[:16]
+
+    def _record_cohort_outcome(
+        self, trial_config: TrialConfig, result: TrialResult
+    ) -> TrialResult:
+        if not self._fail_fast:
+            return result
+        cohort = self.cohort_key(trial_config)
+        if cohort in self._poisoned_cohorts:
+            return result
+        outcomes = self._cohort_outcomes.setdefault(cohort, [])
+        if len(outcomes) >= 3:
+            return result
+        error_class = (
+            self._resolve_error_class(result.exception_info.error_class)
+            if result.exception_info is not None
+            else None
+        )
+        outcomes.append(error_class)
+        if len(outcomes) == 3 and all(
+            outcome == ErrorClass.CONFIG_FATAL for outcome in outcomes
+        ):
+            self._poisoned_cohorts.add(cohort)
+            pending = self._pending_by_cohort.get(cohort, 0)
+            self._logger.error(
+                "Cohort %s poisoned after 3 consecutive CONFIG_FATAL results; "
+                "skipping %d queued trials",
+                cohort,
+                pending,
+            )
+        return result
+
+    async def _make_fail_fast_result(self, trial_config: TrialConfig) -> TrialResult:
+        from presidio.trial.trial import Trial
+
+        task = await Trial._load_task(trial_config)
+        model_name = trial_config.agent.model_name
+        model_info = None
+        if model_name:
+            if "/" in model_name:
+                provider, name = model_name.split("/", 1)
+            else:
+                provider, name = None, model_name
+            model_info = ModelInfo(name=name, provider=provider)
+        agent_info = AgentInfo(
+            name=trial_config.agent.name or trial_config.agent.import_path or "unknown",
+            version="unknown",
+            model_info=model_info,
+        )
+        trial_paths = TrialPaths(
+            trial_dir=trial_config.trials_dir / trial_config.trial_name
+        )
+        trial_paths.mkdir()
+        exception = InvalidModelError(
+            "Trial skipped by fail-fast: its agent cohort was poisoned after "
+            "three CONFIG_FATAL failures."
+        )
+        result = TrialResult(
+            trial_name=trial_config.trial_name,
+            task_name=task.name,
+            task_id=trial_config.task.get_task_id(),
+            trial_uri=trial_paths.trial_dir.resolve().as_uri(),
+            task_checksum=task.checksum,
+            config=trial_config,
+            agent_info=agent_info,
+            exception_info=ExceptionInfo.from_exception(exception),
+            finished_at=datetime.now(timezone.utc),
+            skipped_by_fail_fast=True,
+            source=trial_config.task.source,
+        )
+        trial_paths.result_path.write_text(result.model_dump_json(indent=4))
+        event = TrialHookEvent(
+            event=TrialEvent.END,
+            trial_id=trial_config.trial_name,
+            task_name=task.name,
+            config=trial_config,
+            result=result,
+        )
+        for hook in self._hooks[TrialEvent.END]:
+            await hook(event)
+        return result
+
     async def _execute_trial_with_retries(
         self, trial_config: TrialConfig
     ) -> TrialResult:
@@ -143,7 +239,7 @@ class TrialQueue:
             result = await trial.run()
 
             if result.exception_info is None:
-                return result
+                return self._record_cohort_outcome(trial_config, result)
 
             # A trial that produced a verifier reward already carries the
             # authoritative signal, even though the agent process exited with an
@@ -160,7 +256,7 @@ class TrialQueue:
                     f"a {result.exception_info.exception_type} agent exit — the "
                     "reward is the authoritative signal."
                 )
-                return result
+                return self._record_cohort_outcome(trial_config, result)
 
             classified_error = self._resolve_error_class(
                 result.exception_info.error_class
@@ -176,7 +272,7 @@ class TrialQueue:
                     "include_exceptions or the maximum number of retries has been "
                     "reached"
                 )
-                return result
+                return self._record_cohort_outcome(trial_config, result)
             if (
                 self._retry_config.max_retries_by_class is None
                 and attempt == self._retry_config.max_retries
@@ -185,7 +281,7 @@ class TrialQueue:
                     "Not retrying trial because the maximum number of retries has been "
                     "reached"
                 )
-                return result
+                return self._record_cohort_outcome(trial_config, result)
 
             class_retry_counts[classified_error] = class_attempt + 1
             attempt_dir = trial.trial_dir / "attempts" / f"attempt-{attempt + 1}"
@@ -209,6 +305,12 @@ class TrialQueue:
     async def _run_trial(self, trial_config: TrialConfig) -> TrialResult:
         """Execute a single trial, acquiring the semaphore for concurrency control."""
         async with self._semaphore:
+            cohort = self.cohort_key(trial_config)
+            self._pending_by_cohort[cohort] = max(
+                0, self._pending_by_cohort.get(cohort, 0) - 1
+            )
+            if self._fail_fast and cohort in self._poisoned_cohorts:
+                return await self._make_fail_fast_result(trial_config)
             return await self._execute_trial_with_retries(trial_config)
 
     def submit(self, trial_config: TrialConfig) -> Coroutine[Any, Any, TrialResult]:
@@ -225,4 +327,7 @@ class TrialQueue:
         """
         Return coroutines for multiple trials, ordered to match `configs`.
         """
+        for config in configs:
+            cohort = self.cohort_key(config)
+            self._pending_by_cohort[cohort] = self._pending_by_cohort.get(cohort, 0) + 1
         return [self.submit(config) for config in configs]

@@ -90,6 +90,7 @@ class TrialResult(BaseModel):
     verifier: TimingInfo | None = None
     n_agent_steps: int | None = None
     step_results: list[StepResult] | None = None
+    skipped_by_fail_fast: bool = False
 
     def agent_step_count(self) -> int | None:
         if self.n_agent_steps is not None:

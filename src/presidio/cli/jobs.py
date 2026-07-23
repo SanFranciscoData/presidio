@@ -282,6 +282,15 @@ def start(
             show_default=False,
         ),
     ] = False,
+    no_fail_fast: Annotated[
+        bool,
+        Option(
+            "--no-fail-fast",
+            help="Disable fail-fast poisoning after repeated configuration failures",
+            rich_help_panel="Job Settings",
+            show_default=False,
+        ),
+    ] = False,
     n_concurrent_trials: Annotated[
         int | None,
         Option(
@@ -649,6 +658,7 @@ def start(
         )
     if debug:
         config.debug = debug
+    config.fail_fast = not no_fail_fast
 
     if n_concurrent_trials is not None:
         config.n_concurrent_trials = n_concurrent_trials
@@ -835,6 +845,14 @@ def resume(
             show_default=False,
         ),
     ] = ["CancelledError"],
+    no_fail_fast: Annotated[
+        bool,
+        Option(
+            "--no-fail-fast",
+            help="Disable fail-fast poisoning after repeated configuration failures",
+            show_default=False,
+        ),
+    ] = False,
 ):
     """Resume an existing job from its job directory."""
     from presidio.job import Job
@@ -876,6 +894,7 @@ def resume(
                 shutil.rmtree(trial_dir)
 
     config = JobConfig.model_validate_json(config_path.read_text())
+    config.fail_fast = not no_fail_fast
 
     from presidio.environments.factory import EnvironmentFactory
 
