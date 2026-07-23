@@ -11,6 +11,7 @@ from presidio.agents.installed.base import (
     with_prompt_template,
 )
 from presidio.agents.network import allowlist_from_urls
+from presidio.errors import InvalidModelError, MissingCredentialError
 from presidio.environments.base import BaseEnvironment
 from presidio.models.agent.context import AgentContext
 from presidio.models.agent.install import AgentInstallSpec, InstallStep
@@ -692,14 +693,14 @@ class CursorCli(BaseInstalledAgent):
         context: AgentContext,
     ) -> None:
         if not self.model_name:
-            raise ValueError("Cursor CLI requires agent.model_name")
+            raise InvalidModelError("Cursor CLI requires agent.model_name")
 
         model = self.model_name.split("/", 1)[-1]
         env = self.build_process_env(
             {"CURSOR_API_KEY": self._get_env("CURSOR_API_KEY")}
         )
         if "CURSOR_API_KEY" not in env:
-            raise ValueError(
+            raise MissingCredentialError(
                 "CURSOR_API_KEY is required for cursor-cli. "
                 "Set it in the process environment or pass --env-file .env."
             )

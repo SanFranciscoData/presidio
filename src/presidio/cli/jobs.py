@@ -3,7 +3,7 @@ import shutil
 import signal
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import yaml
 from dotenv import dotenv_values, load_dotenv
@@ -13,6 +13,7 @@ from typer import Option, Typer
 
 from presidio.cli.host_env import confirm_host_env_access
 from presidio.cli.utils import parse_env_vars, parse_kwargs, run_async
+from presidio.errors import ErrorClass
 from presidio.models.agent.name import AgentName
 from presidio.models.environment_type import EnvironmentType
 from presidio.models.job.config import (
@@ -284,6 +285,15 @@ def start(
             show_default=False,
         ),
     ] = None,
+    retry_policy: Annotated[
+        Literal["legacy", "default"],
+        Option(
+            "--retry-policy",
+            help="Retry policy to use (default: legacy)",
+            rich_help_panel="Job Settings",
+            show_default=True,
+        ),
+    ] = "legacy",
     retry_include_exceptions: Annotated[
         list[str] | None,
         Option(
@@ -627,6 +637,12 @@ def start(
         config.quiet = quiet
     if max_retries is not None:
         config.retry.max_retries = max_retries
+    if retry_policy == "default":
+        config.retry.max_retries_by_class = {
+            ErrorClass.PROVIDER_TRANSIENT: 2,
+            ErrorClass.PROVIDER_QUOTA: 0,
+            ErrorClass.UNKNOWN: 1,
+        }
     if retry_include_exceptions is not None:
         config.retry.include_exceptions = set(retry_include_exceptions)
     if retry_exclude_exceptions is not None:
@@ -809,6 +825,8 @@ def resume(
         filter_error_types_set = set(filter_error_types)
         for trial_dir in job_dir.iterdir():
             if not trial_dir.is_dir():
+                continue
+            if trial_dir.name == "attempts":
                 continue
 
             trial_paths = TrialPaths(trial_dir)

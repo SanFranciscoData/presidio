@@ -14,6 +14,7 @@ from presidio.agents.installed.base import (
 )
 from presidio.agents.network import allowlist_from_urls, collect_url_values
 from presidio.agents.utils import get_api_key_var_names_from_model_name
+from presidio.errors import InvalidModelError, MissingCredentialError
 from presidio.environments.base import BaseEnvironment
 from presidio.models.agent.context import AgentContext
 from presidio.models.agent.install import AgentInstallSpec, InstallStep
@@ -836,7 +837,9 @@ mini-swe-agent --help
 
         run_model_name = self._run_model_name
         if not run_model_name or "/" not in run_model_name:
-            raise ValueError("Model name must be in the format provider/model_name")
+            raise InvalidModelError(
+                "Model name must be in the format provider/model_name"
+            )
 
         env = self.build_process_env(
             {
@@ -860,7 +863,7 @@ mini-swe-agent --help
                             f"Please set {api_key_var} or MSWEA_API_KEY environment variable"
                         )
             except ValueError as e:
-                raise ValueError(
+                raise MissingCredentialError(
                     f"Unable to determine API key for model {self.model_name}: {e}. "
                     "Please set MSWEA_API_KEY environment variable as fallback"
                 )

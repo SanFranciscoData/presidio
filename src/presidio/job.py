@@ -202,6 +202,8 @@ class Job:
         for trial_dir in self.job_dir.iterdir():
             if not trial_dir.is_dir():
                 continue
+            if trial_dir.name == "attempts":
+                continue
 
             trial_paths = TrialPaths(trial_dir)
 

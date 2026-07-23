@@ -15,18 +15,23 @@ from types import SimpleNamespace
 
 import pytest
 
+from presidio.errors import ErrorClass
 from presidio.models.job.config import RetryConfig
 from presidio.models.trial.result import ExceptionInfo
 from presidio.models.verifier.result import VerifierResult
 from presidio.trial.queue import TrialQueue
 
 
-def _exc(kind: str = "NonZeroAgentExitCodeError") -> ExceptionInfo:
+def _exc(
+    kind: str = "NonZeroAgentExitCodeError",
+    error_class: str | None = None,
+) -> ExceptionInfo:
     return ExceptionInfo(
         exception_type=kind,
         exception_message="boom",
         exception_traceback="tb",
         occurred_at=__import__("datetime").datetime.now(),
+        error_class=error_class,
     )
 
 
@@ -122,6 +127,133 @@ def test_empty_reward_dict_is_treated_as_no_signal(monkeypatch, tmp_path):
     queue = TrialQueue(n_concurrent=1, retry_config=RetryConfig(max_retries=2))
     result = _run(queue)
     assert result is recovered and created["n"] == 2
+
+
+@pytest.mark.parametrize(
+    ("error_class", "max_retries", "expected_attempts"),
+    [
+        (ErrorClass.PROVIDER_TRANSIENT.value, 2, 3),
+        (ErrorClass.CONFIG_FATAL.value, 2, 1),
+        (ErrorClass.UNKNOWN.value, 1, 2),
+    ],
+)
+def test_classified_retry_policy_uses_per_class_budget(
+    monkeypatch, tmp_path, error_class, max_retries, expected_attempts
+):
+    results = [
+        SimpleNamespace(
+            exception_info=_exc(error_class=error_class),
+            verifier_result=None,
+        )
+        for _ in range(expected_attempts - 1)
+    ]
+    results.append(
+        SimpleNamespace(exception_info=None, verifier_result=None)
+    )
+    created = _install_fake_trials(monkeypatch, tmp_path, results)
+    policy = {
+        ErrorClass.PROVIDER_TRANSIENT: 2,
+        ErrorClass.UNKNOWN: 1,
+    }
+    policy[ErrorClass(error_class)] = max_retries
+    queue = TrialQueue(
+        n_concurrent=1,
+        retry_config=RetryConfig(
+            max_retries_by_class=policy,
+            min_wait_sec=0,
+        ),
+    )
+
+    result = _run(queue)
+
+    assert result is results[-1]
+    assert created["n"] == expected_attempts
+
+
+def test_unknown_error_class_uses_unknown_budget(monkeypatch, tmp_path):
+    crashed = SimpleNamespace(
+        exception_info=_exc(error_class="future_class"),
+        verifier_result=None,
+    )
+    recovered = SimpleNamespace(exception_info=None, verifier_result=None)
+    created = _install_fake_trials(monkeypatch, tmp_path, [crashed, recovered])
+    queue = TrialQueue(
+        n_concurrent=1,
+        retry_config=RetryConfig(
+            max_retries_by_class={ErrorClass.UNKNOWN: 1},
+            min_wait_sec=0,
+        ),
+    )
+
+    result = _run(queue)
+
+    assert result is recovered
+    assert created["n"] == 2
+
+
+def test_classified_retry_budgets_are_independent(monkeypatch, tmp_path):
+    transient = SimpleNamespace(
+        exception_info=_exc(error_class=ErrorClass.PROVIDER_TRANSIENT.value),
+        verifier_result=None,
+    )
+    unknown = SimpleNamespace(
+        exception_info=_exc(error_class=ErrorClass.UNKNOWN.value),
+        verifier_result=None,
+    )
+    recovered = SimpleNamespace(exception_info=None, verifier_result=None)
+    created = _install_fake_trials(
+        monkeypatch, tmp_path, [transient, unknown, recovered]
+    )
+    queue = TrialQueue(
+        n_concurrent=1,
+        retry_config=RetryConfig(
+            max_retries_by_class={
+                ErrorClass.PROVIDER_TRANSIENT: 1,
+                ErrorClass.UNKNOWN: 1,
+            },
+            min_wait_sec=0,
+        ),
+    )
+
+    result = _run(queue)
+
+    assert result is recovered
+    assert created["n"] == 3
+
+
+def test_failed_attempt_is_retained(monkeypatch, tmp_path):
+    root = tmp_path / "trial"
+    root.mkdir()
+    (root / "result.json").write_text("failed")
+    (root / "agent.log").write_text("log")
+    results = [
+        SimpleNamespace(
+            exception_info=_exc(error_class=ErrorClass.UNKNOWN.value),
+            verifier_result=None,
+        ),
+        SimpleNamespace(exception_info=None, verifier_result=None),
+    ]
+    sequence = iter(results)
+
+    async def _create(_config):
+        return _FakeTrial(next(sequence), root)
+
+    import presidio.trial.trial as trial_mod
+
+    monkeypatch.setattr(trial_mod, "Trial", SimpleNamespace(create=_create))
+    queue = TrialQueue(
+        n_concurrent=1,
+        retry_config=RetryConfig(
+            max_retries_by_class={ErrorClass.UNKNOWN: 1},
+            min_wait_sec=0,
+        ),
+    )
+
+    _run(queue)
+
+    assert (root / "attempts" / "attempt-1" / "result.json").read_text() == "failed"
+    assert (root / "attempts" / "attempt-1" / "agent.log").read_text() == "log"
+    assert not (root / "result.json").exists()
 
 
 if __name__ == "__main__":

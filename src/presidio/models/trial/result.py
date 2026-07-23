@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
+from presidio.errors import classify
 from presidio.models.agent.context import AgentContext
 from presidio.models.task.id import GitTaskId, LocalTaskId, PackageTaskId
 from presidio.models.trial.config import TrialConfig
@@ -24,6 +25,7 @@ class ExceptionInfo(BaseModel):
     exception_message: str
     exception_traceback: str
     occurred_at: datetime
+    error_class: str | None = None
 
     @classmethod
     def from_exception(cls, e: BaseException) -> "ExceptionInfo":
@@ -32,6 +34,7 @@ class ExceptionInfo(BaseModel):
             exception_message=str(e),
             exception_traceback=traceback.format_exc(),
             occurred_at=datetime.now(),
+            error_class=classify(e).value,
         )
 
 
