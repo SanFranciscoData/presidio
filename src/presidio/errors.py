@@ -12,12 +12,6 @@ from enum import Enum
 # provider_quota rather than provider_transient.
 CAPACITY_LIMIT_MARKERS = ("limit exceeded",)
 
-
-def message_matches_markers(message: str, markers: tuple[str, ...]) -> bool:
-    lowered = message.lower()
-    return any(marker in lowered for marker in markers)
-
-
 MODEL_NOT_FOUND_MARKERS = (
     "not found for api version",
     "model not found",
