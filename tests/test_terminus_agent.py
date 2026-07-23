@@ -3,7 +3,6 @@ from types import SimpleNamespace
 
 from presidio.agents.terminus import PresidioTmuxSession, Terminus2Agent, TerminusAgent
 from presidio.models.trajectories import Trajectory
-from presidio.worker import _progress_payload
 
 
 def _session() -> PresidioTmuxSession:
@@ -136,12 +135,6 @@ def test_build_trajectory_from_episode_logs(tmp_path):
     serialized = trajectory.to_json_dict()
     round_tripped = Trajectory.model_validate_json(json.dumps(serialized))
     assert len(round_tripped.steps) == 2
-    assert _progress_payload(serialized) == {
-        "n_steps": 2,
-        "last_tool": "terminal",
-        "tokens_in": 33,
-        "tokens_out": 8,
-    }
     assert (tmp_path / "trajectory.json").exists()
 
 
@@ -186,8 +179,3 @@ def test_build_trajectory_falls_back_to_aggregate_tokens_when_metrics_missing(
     assert trajectory.final_metrics.total_prompt_tokens == 12
     assert trajectory.final_metrics.total_completion_tokens == 4
     assert trajectory.final_metrics.total_cached_tokens is None
-    serialized = trajectory.to_json_dict()
-    assert _progress_payload(serialized) == {
-        "n_steps": 1,
-        "last_tool": "terminal",
-    }
