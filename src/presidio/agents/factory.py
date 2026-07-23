@@ -10,6 +10,7 @@ from presidio.agents.installed.mini_swe_agent import MiniSweAgent
 from presidio.agents.installed.opencode import OpenCode
 from presidio.agents.nop import NopAgent
 from presidio.agents.oracle import OracleAgent
+from presidio.agents.terminus import Terminus2Agent, TerminusAgent
 from presidio.models.agent.name import AgentName
 from presidio.models.trial.config import AgentConfig
 from presidio.utils.env import resolve_env_vars
@@ -25,6 +26,8 @@ class AgentFactory:
         GeminiCli,
         MiniSweAgent,
         OpenCode,
+        TerminusAgent,
+        Terminus2Agent,
     ]
     _AGENT_MAP: dict[AgentName, type[BaseAgent]] = {
         AgentName(agent.name()): agent for agent in _AGENTS
