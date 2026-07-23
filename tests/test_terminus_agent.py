@@ -179,3 +179,17 @@ def test_build_trajectory_falls_back_to_aggregate_tokens_when_metrics_missing(
     assert trajectory.final_metrics.total_prompt_tokens == 12
     assert trajectory.final_metrics.total_completion_tokens == 4
     assert trajectory.final_metrics.total_cached_tokens is None
+
+
+def test_make_tb_agent_omits_temperature_when_unset(tmp_path):
+    agent = TerminusAgent(logs_dir=tmp_path, model_name="anthropic/claude-sonnet-5")
+    tb_agent = agent._make_tb_agent()
+    assert tb_agent._llm._supports_temperature is False
+
+
+def test_make_tb_agent_passes_explicit_temperature(tmp_path):
+    agent = TerminusAgent(
+        logs_dir=tmp_path, model_name="anthropic/claude-sonnet-5", temperature=1.0
+    )
+    tb_agent = agent._make_tb_agent()
+    assert tb_agent._llm._temperature == 1.0

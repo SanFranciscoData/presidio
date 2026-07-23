@@ -235,7 +235,7 @@ class _BaseTerminusAgent(BaseAgent):
         prompt_template_path: Path | str | None = None,
         max_episodes: int | None = None,
         api_base: str | None = None,
-        temperature: float = 0.7,
+        temperature: float | None = None,
         exec_timeout_sec: int = 1200,
         version: str | None = None,
         **kwargs: Any,
@@ -279,6 +279,16 @@ class _BaseTerminusAgent(BaseAgent):
             steps=[InstallStep(run=install_tmux, user="root")],
             verification_command="tmux -V",
         )
+
+    def _apply_temperature_policy(self, tb_agent: Any) -> Any:
+        # terminal-bench always sends its default temperature (0.7) when the
+        # model's litellm capability map says temperature is supported, but
+        # newer models (e.g. Anthropic's latest) reject any non-default
+        # temperature. When no temperature was requested, disable sending it
+        # so the provider default applies.
+        if self._temperature is None:
+            tb_agent._llm._supports_temperature = False
+        return tb_agent
 
     def _render_instruction(self, instruction: str) -> str:
         if self._prompt_template_path:
@@ -553,11 +563,12 @@ class TerminusAgent(_BaseTerminusAgent):
         kwargs = {
             "model_name": self.model_name,
             "api_base": self._api_base,
-            "temperature": self._temperature,
         }
+        if self._temperature is not None:
+            kwargs["temperature"] = self._temperature
         if self._max_episodes is not None:
             kwargs["max_episodes"] = self._max_episodes
-        return Terminus(**kwargs)
+        return self._apply_temperature_policy(Terminus(**kwargs))
 
 
 class Terminus2Agent(_BaseTerminusAgent):
@@ -574,10 +585,12 @@ class Terminus2Agent(_BaseTerminusAgent):
     def _make_tb_agent(self):
         from terminal_bench.agents.terminus_2.terminus_2 import Terminus2
 
-        return Terminus2(
-            model_name=self.model_name,
-            max_episodes=self._max_episodes,
-            parser_name=self._parser_name,
-            api_base=self._api_base,
-            temperature=self._temperature,
-        )
+        kwargs = {
+            "model_name": self.model_name,
+            "max_episodes": self._max_episodes,
+            "parser_name": self._parser_name,
+            "api_base": self._api_base,
+        }
+        if self._temperature is not None:
+            kwargs["temperature"] = self._temperature
+        return self._apply_temperature_policy(Terminus2(**kwargs))
