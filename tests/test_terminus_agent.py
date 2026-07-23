@@ -184,6 +184,7 @@ def test_build_trajectory_falls_back_to_aggregate_tokens_when_metrics_missing(
 def test_make_tb_agent_omits_temperature_when_unset(tmp_path):
     agent = TerminusAgent(logs_dir=tmp_path, model_name="anthropic/claude-sonnet-5")
     tb_agent = agent._make_tb_agent()
+    assert tb_agent._llm._temperature is None
     assert tb_agent._llm._supports_temperature is False
 
 

@@ -281,12 +281,13 @@ class _BaseTerminusAgent(BaseAgent):
         )
 
     def _apply_temperature_policy(self, tb_agent: Any) -> Any:
-        # terminal-bench always sends its default temperature (0.7) when the
-        # model's litellm capability map says temperature is supported, but
-        # newer models (e.g. Anthropic's latest) reject any non-default
-        # temperature. When no temperature was requested, disable sending it
-        # so the provider default applies.
+        # terminal-bench always sends its default temperature (0.7), but newer
+        # models (e.g. Anthropic's latest) reject any non-default temperature.
+        # When no temperature was requested, clear it on the underlying LiteLLM
+        # client (litellm omits temperature=None) so the provider default
+        # applies.
         if self._temperature is None:
+            tb_agent._llm._temperature = None
             tb_agent._llm._supports_temperature = False
         return tb_agent
 
