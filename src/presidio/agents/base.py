@@ -16,6 +16,13 @@ class BaseAgent(ABC):
     model_name: str | None
     logger: logging.Logger
 
+    #: Whole-run execution budget (seconds) for this agent, threaded down from
+    #: the trial runner. Environment-agnostic: subclasses use it as the default
+    #: per-command timeout so a backend's short-command default (e.g. a sandbox
+    #: session-command default) can never prematurely kill a long agent run.
+    #: ``None`` leaves each backend's own default in force (legacy behavior).
+    _agent_timeout_sec: float | None
+
     # Whether agent supports Presidio's trajectory format (ATIF)
     # Subclasses should override this class variable to indicate ATIF support
     SUPPORTS_ATIF: bool = False
@@ -34,6 +41,7 @@ class BaseAgent(ABC):
         mcp_servers: list[MCPServerConfig]
         | None = None,  # MCP servers from task config; see setup()/run() for usage
         skills_dir: str | None = None,  # Skills directory path in the environment
+        agent_timeout_sec: float | None = None,
         *args,
         **kwargs,
     ):
@@ -42,6 +50,7 @@ class BaseAgent(ABC):
         self.logger = (logger or global_logger).getChild(__name__)
         self.mcp_servers = mcp_servers or []
         self.skills_dir = skills_dir
+        self._agent_timeout_sec = agent_timeout_sec
 
         self._init_model_info()
 

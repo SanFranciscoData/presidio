@@ -161,13 +161,14 @@ class TrialExecution:
         logger: Logger,
         agent_timeout_sec: float | None,
     ):
-        extra_kwargs: dict[str, Any] = {}
+        # Thread the resolved execution budget into EVERY agent (not just the
+        # oracle): installed CLI agents use it as the default per-command
+        # timeout so no backend's short-command default can prematurely kill a
+        # long agent run. Agent/provider/model-agnostic.
+        extra_kwargs: dict[str, Any] = {"agent_timeout_sec": agent_timeout_sec}
         if agent_config.name == AgentName.ORACLE.value:
-            extra_kwargs = {
-                "task_dir": task.task_dir,
-                "trial_paths": trial_paths,
-                "agent_timeout_sec": agent_timeout_sec,
-            }
+            extra_kwargs["task_dir"] = task.task_dir
+            extra_kwargs["trial_paths"] = trial_paths
         if task.config.environment.mcp_servers:
             extra_kwargs["mcp_servers"] = task.config.environment.mcp_servers
         if task.config.environment.skills_dir:
