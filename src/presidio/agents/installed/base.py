@@ -325,6 +325,19 @@ class BaseInstalledAgent(BaseAgent, ABC):
             merged_env = dict(env) if env else {}
             merged_env.update(self._extra_env)
 
+        # Provider/agent-agnostic budget propagation: when a caller does not
+        # pin a per-command timeout, fall back to this agent's whole-run
+        # execution budget rather than letting the environment apply its own
+        # short-command default (e.g. a sandbox session-command default). The
+        # agent CLI is exec'd as a single long-running command, so inheriting a
+        # short default silently guillotines the run mid-solve and then gets
+        # mislabeled as the (much larger) agent-level timeout. The true ceiling
+        # stays the trial runner's ``run_agent`` wait_for(agent_timeout_sec);
+        # this only stops a backend default from firing first. ``None`` (no
+        # budget threaded) preserves each backend's legacy default.
+        if timeout_sec is None and self._agent_timeout_sec is not None:
+            timeout_sec = int(self._agent_timeout_sec)
+
         self.logger.debug(
             f"Running command: {command}",
             extra={
