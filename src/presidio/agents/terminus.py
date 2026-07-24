@@ -1,9 +1,11 @@
 import asyncio
+import concurrent.futures
 import importlib.metadata
 import json
 import os
 import re
 import shlex
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +25,30 @@ from presidio.models.trajectories import (
     Trajectory,
 )
 from presidio.utils.templating import render_prompt_template
+
+
+_TERMINUS_MAX_WORKERS_ENV = "PRESIDIO_TERMINUS_MAX_WORKERS"
+_TERMINUS_DEFAULT_MAX_WORKERS = 32
+_TERMINUS_EXECUTOR: concurrent.futures.ThreadPoolExecutor | None = None
+_TERMINUS_EXECUTOR_LOCK = threading.Lock()
+
+
+def _get_terminus_executor() -> concurrent.futures.ThreadPoolExecutor:
+    global _TERMINUS_EXECUTOR
+    if _TERMINUS_EXECUTOR is None:
+        with _TERMINUS_EXECUTOR_LOCK:
+            if _TERMINUS_EXECUTOR is None:
+                max_workers = int(
+                    os.environ.get(
+                        _TERMINUS_MAX_WORKERS_ENV,
+                        str(_TERMINUS_DEFAULT_MAX_WORKERS),
+                    )
+                )
+                _TERMINUS_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=max_workers,
+                    thread_name_prefix="terminus-agent",
+                )
+    return _TERMINUS_EXECUTOR
 
 
 class _EnvExecResult:
@@ -531,7 +557,8 @@ class _BaseTerminusAgent(BaseAgent):
         old_env = {key: os.environ.get(key) for key in self._extra_env}
         try:
             os.environ.update(self._extra_env)
-            result = await asyncio.to_thread(_run_sync)
+            # Keep host-side Terminus work out of the loop's shared executor.
+            result = await loop.run_in_executor(_get_terminus_executor(), _run_sync)
         except Exception:
             self.logger.exception("Terminus agent execution failed")
             raise
