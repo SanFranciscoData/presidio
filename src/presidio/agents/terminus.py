@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import functools
 import importlib.metadata
 import json
 import os
@@ -31,6 +32,9 @@ _TERMINUS_MAX_WORKERS_ENV = "PRESIDIO_TERMINUS_MAX_WORKERS"
 _TERMINUS_DEFAULT_MAX_WORKERS = 32
 _TERMINUS_EXECUTOR: concurrent.futures.ThreadPoolExecutor | None = None
 _TERMINUS_EXECUTOR_LOCK = threading.Lock()
+_OPENROUTER_REASONING_ENV = "PRESIDIO_OPENROUTER_REASONING"
+_OPENROUTER_REASONING_SHIM = "_presidio_openrouter_reasoning_shim"
+_OPENROUTER_REASONING_LOCK = threading.Lock()
 
 
 def _get_terminus_executor() -> concurrent.futures.ThreadPoolExecutor:
@@ -49,6 +53,39 @@ def _get_terminus_executor() -> concurrent.futures.ThreadPoolExecutor:
                     thread_name_prefix="terminus-agent",
                 )
     return _TERMINUS_EXECUTOR
+
+
+def _install_openrouter_reasoning_shim() -> None:
+    import litellm
+
+    if os.environ.get(_OPENROUTER_REASONING_ENV, "disabled").strip().lower() in {
+        "none",
+        "skip",
+    }:
+        return
+    with _OPENROUTER_REASONING_LOCK:
+        if getattr(litellm, _OPENROUTER_REASONING_SHIM, False):
+            return
+        mode = os.environ.get(_OPENROUTER_REASONING_ENV, "disabled").strip().lower()
+        reasoning = (
+            {"effort": mode}
+            if mode in {"low", "medium", "high"}
+            else {"enabled": False}
+        )
+        original_completion = litellm.completion
+
+        @functools.wraps(original_completion)
+        def completion(*args, **kwargs):
+            model = kwargs.get("model") or (args[0] if args else None)
+            if isinstance(model, str) and model.startswith("openrouter/"):
+                extra_body = dict(kwargs.get("extra_body") or {})
+                if "reasoning" not in extra_body:
+                    extra_body["reasoning"] = reasoning.copy()
+                    kwargs["extra_body"] = extra_body
+            return original_completion(*args, **kwargs)
+
+        litellm.completion = completion
+        setattr(litellm, _OPENROUTER_REASONING_SHIM, True)
 
 
 class _EnvExecResult:
@@ -557,6 +594,7 @@ class _BaseTerminusAgent(BaseAgent):
         old_env = {key: os.environ.get(key) for key in self._extra_env}
         try:
             os.environ.update(self._extra_env)
+            _install_openrouter_reasoning_shim()
             # Keep host-side Terminus work out of the loop's shared executor.
             result = await loop.run_in_executor(_get_terminus_executor(), _run_sync)
         except Exception:

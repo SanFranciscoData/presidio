@@ -1,8 +1,78 @@
 import json
 from types import SimpleNamespace
 
+import litellm
+
+from presidio.agents import terminus as terminus_module
 from presidio.agents.terminus import PresidioTmuxSession, Terminus2Agent, TerminusAgent
 from presidio.models.trajectories import Trajectory
+
+
+def _mock_litellm_completion(monkeypatch):
+    calls = []
+
+    def completion(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    monkeypatch.setattr(litellm, "completion", completion)
+    monkeypatch.delattr(
+        litellm,
+        terminus_module._OPENROUTER_REASONING_SHIM,
+        raising=False,
+    )
+    return calls
+
+
+def test_openrouter_reasoning_is_disabled_by_default(monkeypatch):
+    calls = _mock_litellm_completion(monkeypatch)
+    monkeypatch.delenv(terminus_module._OPENROUTER_REASONING_ENV, raising=False)
+
+    terminus_module._install_openrouter_reasoning_shim()
+    litellm.completion(model="openrouter/tencent/hy3")
+
+    assert calls[0][1]["extra_body"] == {"reasoning": {"enabled": False}}
+
+
+def test_openrouter_reasoning_effort_is_configurable(monkeypatch):
+    calls = _mock_litellm_completion(monkeypatch)
+    monkeypatch.setenv(terminus_module._OPENROUTER_REASONING_ENV, "low")
+
+    terminus_module._install_openrouter_reasoning_shim()
+    litellm.completion(model="openrouter/tencent/hy3")
+
+    assert calls[0][1]["extra_body"] == {"reasoning": {"effort": "low"}}
+
+
+def test_non_openrouter_completion_is_untouched(monkeypatch):
+    calls = _mock_litellm_completion(monkeypatch)
+    monkeypatch.delenv(terminus_module._OPENROUTER_REASONING_ENV, raising=False)
+
+    terminus_module._install_openrouter_reasoning_shim()
+    litellm.completion(model="anthropic/claude-sonnet-4-5")
+
+    assert calls[0][1] == {"model": "anthropic/claude-sonnet-4-5"}
+
+
+def test_openrouter_reasoning_override_is_preserved(monkeypatch):
+    calls = _mock_litellm_completion(monkeypatch)
+    monkeypatch.delenv(terminus_module._OPENROUTER_REASONING_ENV, raising=False)
+    extra_body = {"reasoning": {"effort": "high"}, "other": "value"}
+
+    terminus_module._install_openrouter_reasoning_shim()
+    litellm.completion(model="openrouter/tencent/hy3", extra_body=extra_body)
+
+    assert calls[0][1]["extra_body"] == extra_body
+
+
+def test_openrouter_reasoning_shim_installation_is_idempotent(monkeypatch):
+    _mock_litellm_completion(monkeypatch)
+    monkeypatch.delenv(terminus_module._OPENROUTER_REASONING_ENV, raising=False)
+
+    terminus_module._install_openrouter_reasoning_shim()
+    wrapped_completion = litellm.completion
+    terminus_module._install_openrouter_reasoning_shim()
+
+    assert litellm.completion is wrapped_completion
 
 
 def _session() -> PresidioTmuxSession:
