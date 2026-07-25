@@ -78,6 +78,8 @@ DAYTONA_WORKDIR_CAPTURE_PATH = "/etc/presidio/workdir"
 DAYTONA_OWNER_LABEL = "presidio.owner-token"
 DAYTONA_DEFAULT_AUTO_STOP_INTERVAL_MINS = 60
 DAYTONA_DEFAULT_AUTO_DELETE_INTERVAL_MINS = 0
+PRESIDIO_DAYTONA_AUTO_STOP_MINS = "PRESIDIO_DAYTONA_AUTO_STOP_MINS"
+PRESIDIO_DAYTONA_AUTO_DELETE_MINS = "PRESIDIO_DAYTONA_AUTO_DELETE_MINS"
 # Daytona auto-stops a sandbox after its inactivity interval even while a process
 # runs inside it (a background command is not enough to keep it alive; only
 # lifecycle/activity API calls reset the timer). A long agent phase (e.g. a
@@ -92,6 +94,28 @@ DAYTONA_CREATE_MAX_ATTEMPTS = 2
 DAYTONA_RATE_LIMIT_MAX_ATTEMPTS = 5
 DAYTONA_RATE_LIMIT_MAX_DELAY_SEC = 120.0
 DAYTONA_SESSION_COMMAND_GRACE_SEC = 60.0
+
+
+def _resolve_auto_interval(
+    value: int | None,
+    env_name: str,
+    default: int,
+) -> int:
+    if value is not None:
+        return value
+    raw_value = os.environ.get(env_name)
+    if raw_value is None:
+        return default
+    try:
+        return int(raw_value.strip())
+    except (TypeError, ValueError):
+        logger.warning(
+            "Ignoring invalid %s=%r; using Daytona default %s.",
+            env_name,
+            raw_value,
+            default,
+        )
+        return default
 
 
 def _mb_to_gib_ceil(mb: int) -> int:
@@ -856,15 +880,15 @@ class DaytonaEnvironment(BaseEnvironment):
             **kwargs,
         )
 
-        self._auto_stop_interval = (
-            DAYTONA_DEFAULT_AUTO_STOP_INTERVAL_MINS
-            if auto_stop_interval_mins is None
-            else auto_stop_interval_mins
+        self._auto_stop_interval = _resolve_auto_interval(
+            auto_stop_interval_mins,
+            PRESIDIO_DAYTONA_AUTO_STOP_MINS,
+            DAYTONA_DEFAULT_AUTO_STOP_INTERVAL_MINS,
         )
-        self._auto_delete_interval = (
-            DAYTONA_DEFAULT_AUTO_DELETE_INTERVAL_MINS
-            if auto_delete_interval_mins is None
-            else auto_delete_interval_mins
+        self._auto_delete_interval = _resolve_auto_interval(
+            auto_delete_interval_mins,
+            PRESIDIO_DAYTONA_AUTO_DELETE_MINS,
+            DAYTONA_DEFAULT_AUTO_DELETE_INTERVAL_MINS,
         )
         if self._auto_stop_interval == 0 and self._auto_delete_interval < 0:
             self.logger.warning(
