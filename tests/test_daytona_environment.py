@@ -21,6 +21,8 @@ from presidio.environments.daytona import (
     DAYTONA_OWNER_LABEL,
     DAYTONA_RATE_LIMIT_MAX_ATTEMPTS,
     DAYTONA_SESSION_COMMAND_GRACE_SEC,
+    PRESIDIO_DAYTONA_AUTO_DELETE_MINS,
+    PRESIDIO_DAYTONA_AUTO_STOP_MINS,
     DaytonaEnvironment,
     _mb_to_gib_ceil,
     _retry_after_seconds,
@@ -132,6 +134,45 @@ def test_explicit_auto_intervals_are_honored(tmp_path):
     env = _make_env(tmp_path, auto_stop_interval_mins=0, auto_delete_interval_mins=30)
     assert env._auto_stop_interval == 0
     assert env._auto_delete_interval == 30
+
+
+def test_env_auto_intervals_override_defaults(tmp_path, monkeypatch):
+    monkeypatch.setenv(PRESIDIO_DAYTONA_AUTO_STOP_MINS, "480")
+    monkeypatch.setenv(PRESIDIO_DAYTONA_AUTO_DELETE_MINS, "30")
+
+    env = _make_env(tmp_path)
+
+    assert env._auto_stop_interval == 480
+    assert env._auto_delete_interval == 30
+
+
+def test_explicit_auto_intervals_take_precedence_over_env(tmp_path, monkeypatch):
+    monkeypatch.setenv(PRESIDIO_DAYTONA_AUTO_STOP_MINS, "480")
+    monkeypatch.setenv(PRESIDIO_DAYTONA_AUTO_DELETE_MINS, "30")
+
+    env = _make_env(tmp_path, auto_stop_interval_mins=10, auto_delete_interval_mins=20)
+
+    assert env._auto_stop_interval == 10
+    assert env._auto_delete_interval == 20
+
+
+def test_invalid_env_auto_intervals_use_defaults(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv(PRESIDIO_DAYTONA_AUTO_STOP_MINS, "not-an-int")
+    monkeypatch.setenv(PRESIDIO_DAYTONA_AUTO_DELETE_MINS, " ")
+
+    with caplog.at_level(logging.WARNING):
+        env = _make_env(tmp_path)
+
+    assert env._auto_stop_interval == DAYTONA_DEFAULT_AUTO_STOP_INTERVAL_MINS
+    assert env._auto_delete_interval == DAYTONA_DEFAULT_AUTO_DELETE_INTERVAL_MINS
+    assert any(
+        PRESIDIO_DAYTONA_AUTO_STOP_MINS in record.message
+        for record in caplog.records
+    )
+    assert any(
+        PRESIDIO_DAYTONA_AUTO_DELETE_MINS in record.message
+        for record in caplog.records
+    )
 
 
 def test_fully_disabled_lifecycle_warns(tmp_path, caplog):

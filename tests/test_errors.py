@@ -12,7 +12,9 @@ from presidio.errors import (
     MODEL_NOT_FOUND_MARKERS,
     classify,
 )
+from presidio.models.job.config import RetryConfig
 from presidio.models.trial.result import ExceptionInfo
+from presidio.trial.queue import TrialQueue
 
 
 def _nonzero_exit(message: str) -> NonZeroAgentExitCodeError:
@@ -61,18 +63,36 @@ def test_classify_daytona_invalid_request_stays_provider_transient():
 
 
 @pytest.mark.parametrize(
-    "exception",
+    ("exception", "expected"),
     [
-        type("DaytonaNotFoundError", (Exception,), {})(),
-        type("EnvironmentStartTimeoutError", (Exception,), {})(),
-        type("HealthcheckError", (Exception,), {})(),
-        type("DaytonaCreateError", (Exception,), {})(),
-        type("UploadError", (Exception,), {})(),
-        type("DownloadError", (Exception,), {})(),
+        (
+            type("DaytonaNotFoundError", (Exception,), {})(),
+            ErrorClass.RESOURCE_MISCONFIG,
+        ),
+        (
+            type("EnvironmentStartTimeoutError", (Exception,), {})(),
+            ErrorClass.PROVIDER_TRANSIENT,
+        ),
+        (
+            type("HealthcheckError", (Exception,), {})(),
+            ErrorClass.PROVIDER_TRANSIENT,
+        ),
+        (
+            type("DaytonaCreateError", (Exception,), {})(),
+            ErrorClass.PROVIDER_TRANSIENT,
+        ),
+        (
+            type("UploadError", (Exception,), {})(),
+            ErrorClass.PROVIDER_TRANSIENT,
+        ),
+        (
+            type("DownloadError", (Exception,), {})(),
+            ErrorClass.PROVIDER_TRANSIENT,
+        ),
     ],
 )
-def test_classify_provider_transient_name_fallback(exception):
-    assert classify(exception) is ErrorClass.PROVIDER_TRANSIENT
+def test_classify_daytona_and_environment_errors(exception, expected):
+    assert classify(exception) is expected
 
 
 @pytest.mark.parametrize(
@@ -144,6 +164,20 @@ def test_agent_setup_timeout_is_provider_transient():
     from presidio.trial.execution import AgentSetupTimeoutError
 
     assert classify(AgentSetupTimeoutError()) is ErrorClass.PROVIDER_TRANSIENT
+
+
+def test_missing_daytona_sandbox_remains_retryable():
+    retry_config = RetryConfig(
+        max_retries_by_class={ErrorClass.RESOURCE_MISCONFIG: 2}
+    )
+    assert TrialQueue(
+        n_concurrent=1,
+        retry_config=retry_config,
+    )._should_retry_exception(
+        "DaytonaNotFoundError",
+        error_class=ErrorClass.RESOURCE_MISCONFIG.value,
+        attempt=0,
+    )
 
 
 def test_marker_constants_are_specific():

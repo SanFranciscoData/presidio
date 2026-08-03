@@ -149,9 +149,13 @@ def classify(exc: BaseException) -> ErrorClass:
             {"EgressMisconfigError"},
         ),
         (
+            ErrorClass.RESOURCE_MISCONFIG,
+            _matching_classes(DaytonaNotFoundError),
+            {"DaytonaNotFoundError"},
+        ),
+        (
             ErrorClass.PROVIDER_TRANSIENT,
             _matching_classes(
-                DaytonaNotFoundError,
                 DaytonaError,
                 AgentSetupTimeoutError,
                 EnvironmentStartTimeoutError,
@@ -159,7 +163,6 @@ def classify(exc: BaseException) -> ErrorClass:
             ),
             {
                 "AgentSetupTimeoutError",
-                "DaytonaNotFoundError",
                 "DaytonaError",
                 "DaytonaConnectionError",
                 "DaytonaTimeoutError",

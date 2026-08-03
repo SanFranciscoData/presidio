@@ -670,6 +670,7 @@ def start(
         config.retry.max_retries_by_class = {
             ErrorClass.PROVIDER_TRANSIENT: 2,
             ErrorClass.PROVIDER_QUOTA: 0,
+            ErrorClass.RESOURCE_MISCONFIG: 2,
             ErrorClass.UNKNOWN: 1,
         }
     if retry_include_exceptions is not None:
