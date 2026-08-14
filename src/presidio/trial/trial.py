@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import shlex
 import shutil
 import traceback
@@ -25,9 +26,11 @@ from presidio.models.task.config import (
     EnvironmentConfig as TaskEnvironmentConfig,
 )
 from presidio.models.task.config import (
+    MAIN_SERVICE_NAME,
     MultiStepRewardStrategy,
     NetworkMode,
     StepConfig,
+    VerifierCollectConfig,
     VerifierEnvironmentMode,
 )
 from presidio.models.task.task import Task
@@ -940,7 +943,7 @@ class Trial:
                     target_dir=self._trial_paths.agent_dir,
                 )
                 self._maybe_populate_agent_context(step_result.agent_result)
-                await self._run_pre_artifacts_script()
+                await self._run_collect_hooks(step_cfg)
                 await self._maybe_upload_agent_logs()
 
                 # Collect artifacts from the agent environment before
@@ -1010,37 +1013,64 @@ class Trial:
         # rmdir any that are now empty (safe: rmdir raises on non-empty).
         self._trial_paths.cleanup_empty_mount_dirs()
 
-    async def _run_pre_artifacts_script(self) -> None:
-        """Run the task's optional ``pre_artifacts.sh`` in the agent environment.
+    async def _run_collect_hooks(self, step_cfg: StepConfig | None = None) -> None:
+        """Run the task's ``[[verifier.collect]]`` hooks in the agent environment.
 
-        Runs after the agent finishes and immediately before artifact
+        Hooks run after the agent finishes and immediately before artifact
         collection so the task can materialize artifacts from the agent's work
         (e.g. capture the change set as ``/logs/artifacts/model.patch`` for a
         separate verifier). Failures are logged, not fatal: a missing or failed
         capture simply yields no artifact, which downstream grading treats as
-        an empty submission.
+        an empty submission. Hooks targeting a compose service other than main
+        are skipped: Presidio does not run commands in sidecar services.
         """
-        script = self._task.paths.pre_artifacts_path
-        if not script.exists():
+        hooks = list(self._task.config.verifier.collect)
+        if step_cfg is not None:
+            hooks.extend(step_cfg.verifier.collect)
+        if not hooks:
             return
-        target = "/tmp/.presidio-pre-artifacts.sh"
+        # Clear the environment's default user while hooks run so a hook with
+        # user=None uses the container's default user (as documented) instead
+        # of inheriting the agent user still set on multi-step paths.
+        saved_default_user = self._environment.default_user
+        self._environment.default_user = None
         try:
-            await self._environment.upload_file(
-                source_path=script, target_path=target
-            )
-            result = await self._environment.exec(
-                command=f"bash {target}",
-                timeout_sec=300,
-            )
-            if result.return_code != 0:
+            await self._exec_collect_hooks(hooks)
+        finally:
+            self._environment.default_user = saved_default_user
+
+    async def _exec_collect_hooks(self, hooks: list[VerifierCollectConfig]) -> None:
+        for hook in hooks:
+            if hook.service != MAIN_SERVICE_NAME:
                 self._logger.warning(
-                    f"pre_artifacts.sh exited {result.return_code}"
+                    f"Skipping collect hook targeting unsupported service "
+                    f"'{hook.service}': {hook.command!r}"
                 )
-        except Exception:
-            self._logger.warning(
-                "pre_artifacts.sh failed to run; continuing without it",
-                exc_info=True,
+                continue
+            self._logger.debug(
+                f"Running collect hook in service '{hook.service}': {hook.command!r}"
             )
+            try:
+                result = await self._environment.exec(
+                    command=hook.command,
+                    timeout_sec=max(1, math.ceil(hook.timeout_sec)),
+                    user=hook.user,
+                )
+                if result.return_code != 0:
+                    self._logger.warning(
+                        f"Collect hook in service '{hook.service}' exited with "
+                        f"code {result.return_code}: {hook.command!r}. "
+                        f"stdout: {result.stdout} stderr: {result.stderr}"
+                    )
+                else:
+                    self._logger.debug(
+                        f"Collect hook in service '{hook.service}' completed"
+                    )
+            except Exception as exc:
+                self._logger.warning(
+                    f"Collect hook in service '{hook.service}' failed "
+                    f"({hook.command!r}): {exc}"
+                )
 
     async def _maybe_upload_agent_logs(self) -> None:
         """Upload locally-generated agent logs back to the environment.
@@ -1148,7 +1178,7 @@ class Trial:
             # so a separate verifier environment can receive them. Multi-step
             # trials collect artifacts per-step inside _run_steps.
             if not self._task.has_steps:
-                await self._run_pre_artifacts_script()
+                await self._run_collect_hooks()
                 await self._maybe_upload_agent_logs()
                 await self._collect_artifacts()
 

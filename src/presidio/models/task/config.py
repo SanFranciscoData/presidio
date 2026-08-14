@@ -140,6 +140,51 @@ class PackageInfo(BaseModel):
         return self.name.split("/")[1]
 
 
+MAIN_SERVICE_NAME = "main"
+
+_COMPOSE_SERVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
+
+
+class VerifierCollectConfig(BaseModel):
+    """A command run in the agent environment after the agent phase ends.
+
+    Collect hooks let tasks snapshot runtime state into files before the
+    environment is torn down, so the files can be declared as artifacts and
+    read by a separate verifier (e.g. capture the agent's change set as
+    ``/logs/artifacts/model.patch``). Mirrors Harbor's ``[[verifier.collect]]``
+    blocks. Presidio only runs hooks targeting the main service; hooks
+    targeting compose sidecar services are skipped with a warning.
+    """
+
+    command: str = Field(..., description="Shell command to run in the service.")
+    service: str = Field(
+        default=MAIN_SERVICE_NAME,
+        description="Compose service to run the command in. Defaults to main. "
+        "Presidio only runs hooks targeting main (the agent's container).",
+    )
+    timeout_sec: float = Field(
+        default=60.0,
+        description="Timeout in seconds for the collect command.",
+    )
+    user: str | int | None = Field(
+        default=None,
+        description="Username or UID to run the command as. None uses the "
+        "service container's default user.",
+    )
+
+    @field_validator("service")
+    @classmethod
+    def _validate_service(cls, value: str) -> str:
+        value = value.strip()
+        if not _COMPOSE_SERVICE_NAME_PATTERN.match(value):
+            raise ValueError(
+                f"Invalid Docker Compose service name: {value!r}. Service names "
+                "must start with an alphanumeric character and contain only "
+                "alphanumeric characters, hyphens, underscores, and dots."
+            )
+        return value
+
+
 class VerifierConfig(BaseModel):
     timeout_sec: float = 600.0
     env: dict[str, str] = Field(default_factory=dict)
@@ -187,6 +232,16 @@ class VerifierConfig(BaseModel):
     @classmethod
     def _validate_allowed_hosts(cls, v: list[str]) -> list[str]:
         return validate_bare_hostnames(v)
+
+    collect: list[VerifierCollectConfig] = Field(
+        default_factory=list,
+        description=(
+            "Commands run in the agent environment after the agent phase ends "
+            "and before artifact collection ([[verifier.collect]] blocks in "
+            "task.toml). Use these to snapshot runtime state into files that "
+            "artifact entries can then collect."
+        ),
+    )
 
     def resolve_phase_network(self) -> "tuple[NetworkMode, list[str]] | None":
         """Effective (mode, hosts) override for the verifier phase, or None."""
