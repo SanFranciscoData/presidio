@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import math
 import logging
 import shlex
 import shutil
@@ -1038,7 +1039,7 @@ class Trial:
             try:
                 result = await self._environment.exec(
                     command=hook.command,
-                    timeout_sec=int(hook.timeout_sec),
+                    timeout_sec=max(1, math.ceil(hook.timeout_sec)),
                     user=hook.user,
                 )
                 if result.return_code != 0:
