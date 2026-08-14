@@ -35,13 +35,16 @@ def run_async(fn):
 
 def _fake_trial(hooks: list[VerifierCollectConfig]) -> SimpleNamespace:
     environment = AsyncMock()
+    environment.default_user = None
     environment.exec.return_value = SimpleNamespace(return_code=0, stdout="", stderr="")
     config = SimpleNamespace(verifier=SimpleNamespace(collect=hooks))
-    return SimpleNamespace(
+    trial = SimpleNamespace(
         _task=SimpleNamespace(config=config),
         _environment=environment,
         _logger=logging.getLogger(__name__),
     )
+    trial._exec_collect_hooks = functools.partial(Trial._exec_collect_hooks, trial)
+    return trial
 
 
 def test_collect_tables_parse_from_task_toml() -> None:
@@ -124,3 +127,33 @@ async def test_exec_exception_is_swallowed() -> None:
     trial = _fake_trial([hook])
     trial._environment.exec.side_effect = RuntimeError("env died")
     await Trial._run_collect_hooks(trial)  # must not raise
+
+
+@run_async
+async def test_default_user_cleared_during_hooks_and_restored() -> None:
+    """Hooks with user=None must run as the container default, not a leftover
+    agent default_user (the multi-step path leaves it set), and the previous
+    default must be restored afterwards."""
+    hook = VerifierCollectConfig(command="echo hi")
+    trial = _fake_trial([hook])
+    trial._environment.default_user = "agent"
+    seen: list[str | int | None] = []
+
+    async def record_exec(**kwargs):
+        seen.append(trial._environment.default_user)
+        return SimpleNamespace(return_code=0, stdout="", stderr="")
+
+    trial._environment.exec = AsyncMock(side_effect=record_exec)
+    await Trial._run_collect_hooks(trial)
+    assert seen == [None]
+    assert trial._environment.default_user == "agent"
+
+
+@run_async
+async def test_default_user_restored_even_if_hook_raises() -> None:
+    hook = VerifierCollectConfig(command="boom")
+    trial = _fake_trial([hook])
+    trial._environment.default_user = "agent"
+    trial._environment.exec.side_effect = RuntimeError("env died")
+    await Trial._run_collect_hooks(trial)
+    assert trial._environment.default_user == "agent"

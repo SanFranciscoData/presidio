@@ -30,6 +30,7 @@ from presidio.models.task.config import (
     MultiStepRewardStrategy,
     NetworkMode,
     StepConfig,
+    VerifierCollectConfig,
     VerifierEnvironmentMode,
 )
 from presidio.models.task.task import Task
@@ -1026,6 +1027,19 @@ class Trial:
         hooks = list(self._task.config.verifier.collect)
         if step_cfg is not None:
             hooks.extend(step_cfg.verifier.collect)
+        if not hooks:
+            return
+        # Clear the environment's default user while hooks run so a hook with
+        # user=None uses the container's default user (as documented) instead
+        # of inheriting the agent user still set on multi-step paths.
+        saved_default_user = self._environment.default_user
+        self._environment.default_user = None
+        try:
+            await self._exec_collect_hooks(hooks)
+        finally:
+            self._environment.default_user = saved_default_user
+
+    async def _exec_collect_hooks(self, hooks: list[VerifierCollectConfig]) -> None:
         for hook in hooks:
             if hook.service != MAIN_SERVICE_NAME:
                 self._logger.warning(
