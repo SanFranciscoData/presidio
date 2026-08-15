@@ -86,6 +86,25 @@ class Codex(BaseInstalledAgent):
     def _should_disable_web_tools(environment: BaseEnvironment) -> bool:
         return not environment.task_env_config.allow_internet
 
+    @staticmethod
+    def _disable_web_search_config_toml(config_toml_text: str | None) -> str:
+        """Merge a web-search disable into user config TOML.
+
+        Codex's web_search tool executes on OpenAI's servers, so the sandbox
+        network policy cannot intercept it. The top-level ``web_search`` mode
+        takes precedence over the legacy ``[features]`` flags (and booleans
+        under ``[tools]`` are ignored by codex, whose default mode is
+        "cached", i.e. enabled); set both so old and new codex versions are
+        covered. Merging into the user config means the override always wins
+        and cannot corrupt the file.
+        """
+        merged = toml.loads(config_toml_text) if config_toml_text else {}
+        merged["web_search"] = "disabled"
+        features = merged.setdefault("features", {})
+        features["web_search_request"] = False
+        features["web_search_cached"] = False
+        return toml.dumps(merged)
+
     @property
     def _trajectory_path(self) -> PurePosixPath:
         return PurePosixPath(EnvironmentPaths.agent_dir / "trajectory.json")
@@ -1129,20 +1148,7 @@ class Codex(BaseInstalledAgent):
             )
         config_toml_text = self._config_toml
         if self._should_disable_web_tools(environment):
-            # Codex's web_search tool executes on OpenAI's servers, so the
-            # sandbox network policy cannot intercept it; disable it whenever
-            # the task does not allow internet access. The top-level
-            # web_search mode takes precedence over the legacy [features]
-            # flags (and booleans under [tools] are ignored by codex); set
-            # both so old and new codex versions are covered. Merge into any
-            # user config so the override always wins and cannot corrupt the
-            # file.
-            merged = toml.loads(config_toml_text) if config_toml_text else {}
-            merged["web_search"] = "disabled"
-            features = merged.setdefault("features", {})
-            features["web_search_request"] = False
-            features["web_search_cached"] = False
-            config_toml_text = toml.dumps(merged)
+            config_toml_text = self._disable_web_search_config_toml(config_toml_text)
         if config_toml_text:
             escaped_toml = shlex.quote(config_toml_text)
             config_toml_block += (
