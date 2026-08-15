@@ -82,6 +82,10 @@ class Codex(BaseInstalledAgent):
     def name() -> str:
         return AgentName.CODEX.value
 
+    @staticmethod
+    def _should_disable_web_tools(environment: BaseEnvironment) -> bool:
+        return not environment.task_env_config.allow_internet
+
     @property
     def _trajectory_path(self) -> PurePosixPath:
         return PurePosixPath(EnvironmentPaths.agent_dir / "trajectory.json")
@@ -1121,6 +1125,16 @@ class Codex(BaseInstalledAgent):
             config_toml_block = (
                 '\ncat >>"$CODEX_HOME/config.toml" <<TOML\n'
                 'openai_base_url = "${OPENAI_BASE_URL}"\n'
+                "TOML"
+            )
+        if self._should_disable_web_tools(environment):
+            # Codex's web_search tool executes on OpenAI's servers, so the
+            # sandbox network policy cannot intercept it; disable it whenever
+            # the task does not allow internet access.
+            config_toml_block += (
+                '\ncat >>"$CODEX_HOME/config.toml" <<TOML\n'
+                "[tools]\n"
+                "web_search = false\n"
                 "TOML"
             )
         if self._config_toml:
