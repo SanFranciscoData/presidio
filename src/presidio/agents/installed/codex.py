@@ -1127,18 +1127,18 @@ class Codex(BaseInstalledAgent):
                 'openai_base_url = "${OPENAI_BASE_URL}"\n'
                 "TOML"
             )
+        config_toml_text = self._config_toml
         if self._should_disable_web_tools(environment):
             # Codex's web_search tool executes on OpenAI's servers, so the
             # sandbox network policy cannot intercept it; disable it whenever
-            # the task does not allow internet access.
-            config_toml_block += (
-                '\ncat >>"$CODEX_HOME/config.toml" <<TOML\n'
-                "[tools]\n"
-                "web_search = false\n"
-                "TOML"
-            )
-        if self._config_toml:
-            escaped_toml = shlex.quote(self._config_toml)
+            # the task does not allow internet access. Merge into any user
+            # config so the override always wins and cannot corrupt the file
+            # (a bare [tools] header would capture subsequent top-level keys).
+            merged = toml.loads(config_toml_text) if config_toml_text else {}
+            merged.setdefault("tools", {})["web_search"] = False
+            config_toml_text = toml.dumps(merged)
+        if config_toml_text:
+            escaped_toml = shlex.quote(config_toml_text)
             config_toml_block += (
                 f'\nprintf "%s\\n" {escaped_toml} >> "$CODEX_HOME/config.toml"\n'
             )
