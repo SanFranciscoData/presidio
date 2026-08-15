@@ -1131,11 +1131,17 @@ class Codex(BaseInstalledAgent):
         if self._should_disable_web_tools(environment):
             # Codex's web_search tool executes on OpenAI's servers, so the
             # sandbox network policy cannot intercept it; disable it whenever
-            # the task does not allow internet access. Merge into any user
-            # config so the override always wins and cannot corrupt the file
-            # (a bare [tools] header would capture subsequent top-level keys).
+            # the task does not allow internet access. The top-level
+            # web_search mode takes precedence over the legacy [features]
+            # flags (and booleans under [tools] are ignored by codex); set
+            # both so old and new codex versions are covered. Merge into any
+            # user config so the override always wins and cannot corrupt the
+            # file.
             merged = toml.loads(config_toml_text) if config_toml_text else {}
-            merged.setdefault("tools", {})["web_search"] = False
+            merged["web_search"] = "disabled"
+            features = merged.setdefault("features", {})
+            features["web_search_request"] = False
+            features["web_search_cached"] = False
             config_toml_text = toml.dumps(merged)
         if config_toml_text:
             escaped_toml = shlex.quote(config_toml_text)
