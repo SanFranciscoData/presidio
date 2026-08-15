@@ -646,12 +646,22 @@ class GeminiCli(BaseInstalledAgent):
             f"~/.gemini/skills/ 2>/dev/null || true"
         )
 
+    @staticmethod
+    def _should_disable_web_tools(environment: BaseEnvironment) -> bool:
+        return not environment.task_env_config.allow_internet
+
     def _build_settings_config(
-        self, model: str | None = None
+        self, model: str | None = None, disable_web_tools: bool = False
     ) -> tuple[dict[str, Any] | None, str | None]:
         """Build Gemini CLI settings and optional model alias for this run."""
         config: dict[str, Any] = {}
         model_alias: str | None = None
+
+        if disable_web_tools:
+            # google_web_search grounding executes on Google's servers, so the
+            # sandbox network policy cannot intercept it; exclude web tools
+            # whenever the task does not allow internet access.
+            config["tools"] = {"exclude": ["google_web_search", "web_fetch"]}
 
         if self.mcp_servers:
             servers = {}
@@ -692,10 +702,10 @@ class GeminiCli(BaseInstalledAgent):
         return config, model_alias
 
     def _build_settings_command(
-        self, model: str | None = None
+        self, model: str | None = None, disable_web_tools: bool = False
     ) -> tuple[str | None, str | None]:
         """Return the settings write command and optional run model alias."""
-        config, model_alias = self._build_settings_config(model)
+        config, model_alias = self._build_settings_config(model, disable_web_tools)
         if config is None:
             return None, model_alias
         escaped = shlex.quote(json.dumps(config, indent=2))
@@ -739,7 +749,9 @@ class GeminiCli(BaseInstalledAgent):
         if skills_command:
             await self.exec_as_agent(environment, command=skills_command, env=env)
 
-        settings_command, model_alias = self._build_settings_command(model)
+        settings_command, model_alias = self._build_settings_command(
+            model, disable_web_tools=self._should_disable_web_tools(environment)
+        )
         if settings_command:
             await self.exec_as_agent(environment, command=settings_command, env=env)
 
