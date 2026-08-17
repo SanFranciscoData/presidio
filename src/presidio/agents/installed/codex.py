@@ -70,9 +70,11 @@ class Codex(BaseInstalledAgent):
         command_model_name: str | None = None,
         config_toml: str | None = None,
         config_toml_file: str | None = None,
+        disable_web_tools: bool = False,
         **kwargs,
     ):
         self._command_model_name = command_model_name
+        self._disable_web_tools = disable_web_tools
         self._config_toml = config_toml
         if config_toml_file:
             self._config_toml = Path(config_toml_file).read_text()
@@ -83,21 +85,19 @@ class Codex(BaseInstalledAgent):
         return AgentName.CODEX.value
 
     @staticmethod
-    def _should_disable_web_tools(environment: BaseEnvironment) -> bool:
+    def _should_disable_web_tools(
+        environment: BaseEnvironment, disable_web_tools: bool = False
+    ) -> bool:
+        if disable_web_tools:
+            return True
+        network_mode = getattr(environment.task_env_config, "network_mode", None)
+        if network_mode is not None:
+            return getattr(network_mode, "value", network_mode) != "public"
         return not environment.task_env_config.allow_internet
 
     @staticmethod
     def _disable_web_search_config_toml(config_toml_text: str | None) -> str:
-        """Merge a web-search disable into user config TOML.
-
-        Codex's web_search tool executes on OpenAI's servers, so the sandbox
-        network policy cannot intercept it. The top-level ``web_search`` mode
-        takes precedence over the legacy ``[features]`` flags (and booleans
-        under ``[tools]`` are ignored by codex, whose default mode is
-        "cached", i.e. enabled); set both so old and new codex versions are
-        covered. Merging into the user config means the override always wins
-        and cannot corrupt the file.
-        """
+        """Merge a web-search disable into user config TOML."""
         merged = toml.loads(config_toml_text) if config_toml_text else {}
         merged["web_search"] = "disabled"
         features = merged.setdefault("features", {})
@@ -345,7 +345,9 @@ class Codex(BaseInstalledAgent):
         peak_context_tokens: int | None = None
         window_peak: int | None = None
         token_drop_summarization_count = 0
-        compacted_item_count = sum(1 for event in raw_events if event.get("type") == "compacted")
+        compacted_item_count = sum(
+            1 for event in raw_events if event.get("type") == "compacted"
+        )
         context_compacted_event_count = 0
         saw_usage = False
 
@@ -1147,7 +1149,7 @@ class Codex(BaseInstalledAgent):
                 "TOML"
             )
         config_toml_text = self._config_toml
-        if self._should_disable_web_tools(environment):
+        if self._should_disable_web_tools(environment, self._disable_web_tools):
             config_toml_text = self._disable_web_search_config_toml(config_toml_text)
         if config_toml_text:
             escaped_toml = shlex.quote(config_toml_text)

@@ -69,9 +69,11 @@ class GeminiCli(BaseInstalledAgent):
         self,
         *args,
         reasoning_effort: _ReasoningEffort | None = None,
+        disable_web_tools: bool = False,
         **kwargs,
     ):
         self._reasoning_effort = reasoning_effort
+        self._disable_web_tools = disable_web_tools
         super().__init__(*args, **kwargs)
         self._validate_reasoning_effort(self._reasoning_effort, self.model_name)
 
@@ -647,7 +649,14 @@ class GeminiCli(BaseInstalledAgent):
         )
 
     @staticmethod
-    def _should_disable_web_tools(environment: BaseEnvironment) -> bool:
+    def _should_disable_web_tools(
+        environment: BaseEnvironment, disable_web_tools: bool = False
+    ) -> bool:
+        if disable_web_tools:
+            return True
+        network_mode = getattr(environment.task_env_config, "network_mode", None)
+        if network_mode is not None:
+            return getattr(network_mode, "value", network_mode) != "public"
         return not environment.task_env_config.allow_internet
 
     def _build_settings_config(
@@ -658,9 +667,6 @@ class GeminiCli(BaseInstalledAgent):
         model_alias: str | None = None
 
         if disable_web_tools:
-            # google_web_search grounding executes on Google's servers, so the
-            # sandbox network policy cannot intercept it; exclude web tools
-            # whenever the task does not allow internet access.
             config["tools"] = {"exclude": ["google_web_search", "web_fetch"]}
 
         if self.mcp_servers:
@@ -750,7 +756,10 @@ class GeminiCli(BaseInstalledAgent):
             await self.exec_as_agent(environment, command=skills_command, env=env)
 
         settings_command, model_alias = self._build_settings_command(
-            model, disable_web_tools=self._should_disable_web_tools(environment)
+            model,
+            disable_web_tools=self._should_disable_web_tools(
+                environment, self._disable_web_tools
+            ),
         )
         if settings_command:
             await self.exec_as_agent(environment, command=settings_command, env=env)

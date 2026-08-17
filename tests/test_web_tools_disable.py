@@ -2,29 +2,43 @@ from types import SimpleNamespace
 
 import toml
 
+from presidio.agents.installed.claude_code import ClaudeCode
 from presidio.agents.installed.codex import Codex
 from presidio.agents.installed.gemini_cli import GeminiCli
 
 
-def _env(allow_internet: bool) -> SimpleNamespace:
+def _env(allow_internet: bool, network_mode: str | None = None) -> SimpleNamespace:
     return SimpleNamespace(
-        task_env_config=SimpleNamespace(allow_internet=allow_internet)
+        task_env_config=SimpleNamespace(
+            allow_internet=allow_internet, network_mode=network_mode
+        )
     )
 
 
 def test_should_disable_web_tools_follows_task_network_policy():
-    assert Codex._should_disable_web_tools(_env(allow_internet=False))
-    assert not Codex._should_disable_web_tools(_env(allow_internet=True))
-    assert GeminiCli._should_disable_web_tools(_env(allow_internet=False))
-    assert not GeminiCli._should_disable_web_tools(_env(allow_internet=True))
+    for agent in (Codex, ClaudeCode, GeminiCli):
+        assert agent._should_disable_web_tools(
+            _env(allow_internet=True, network_mode="allowlist")
+        )
+        assert (
+            agent._should_disable_web_tools(
+                _env(allow_internet=True, network_mode="public")
+            )
+            is False
+        )
 
 
-def test_codex_disable_web_search_with_no_user_config():
-    parsed = toml.loads(Codex._disable_web_search_config_toml(None))
+def test_explicit_web_tools_suppression_overrides_public_network():
+    environment = _env(allow_internet=True, network_mode="public")
 
-    assert parsed["web_search"] == "disabled"
-    assert parsed["features"]["web_search_request"] is False
-    assert parsed["features"]["web_search_cached"] is False
+    for agent in (Codex, ClaudeCode, GeminiCli):
+        assert agent._should_disable_web_tools(environment, disable_web_tools=True)
+
+
+def test_agent_kwarg_plumbs_explicit_web_tools_suppression(tmp_path):
+    for agent in (Codex, ClaudeCode, GeminiCli):
+        instance = agent(logs_dir=tmp_path, disable_web_tools=True)
+        assert instance._disable_web_tools
 
 
 def test_codex_disable_web_search_overrides_user_config():
@@ -35,6 +49,14 @@ def test_codex_disable_web_search_overrides_user_config():
     assert parsed["features"]["web_search_request"] is False
     assert parsed["features"]["web_search_cached"] is False
     assert parsed["features"]["model"] == "x"
+
+
+def test_codex_disable_web_search_with_no_user_config():
+    parsed = toml.loads(Codex._disable_web_search_config_toml(None))
+
+    assert parsed["web_search"] == "disabled"
+    assert parsed["features"]["web_search_request"] is False
+    assert parsed["features"]["web_search_cached"] is False
 
 
 def test_codex_disable_web_search_preserves_top_level_user_keys():
