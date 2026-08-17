@@ -87,7 +87,17 @@ class Codex(BaseInstalledAgent):
 
     @staticmethod
     def _disable_web_search_config_toml(config_toml_text: str | None) -> str:
-        """Merge a web-search disable into user config TOML."""
+        """Merge a web-search disable into user config TOML.
+
+        Codex's web_search tool executes on OpenAI's servers, so the sandbox
+        network policy cannot intercept it. The top-level ``web_search`` mode
+        takes precedence over the legacy ``[features]`` flags (and booleans
+        under ``[tools]`` are ignored by codex, whose default mode is
+        "cached", i.e. enabled); set both so old and new codex versions are
+        covered. The effective network policy requires this override to be
+        merged into the user config so it always wins without discarding the
+        rest of the configuration.
+        """
         try:
             merged = toml.loads(config_toml_text) if config_toml_text else {}
         except toml.TomlDecodeError as exc:

@@ -1327,9 +1327,12 @@ class ClaudeCode(BaseInstalledAgent):
             setup_command += f" && {mcp_command}"
 
         if self._should_disable_web_tools(environment, self._disable_web_tools):
+            # WebSearch executes on Anthropic's servers, so the sandbox network
+            # policy cannot intercept it; disallow web tools whenever the
+            # effective network mode is not public.
             disallowed = str(self._resolved_flags.get("disallowed_tools") or "")
-            tools = [tool for tool in disallowed.split(",") if tool]
-            tools += [tool for tool in ("WebSearch", "WebFetch") if tool not in tools]
+            tools = [t for t in disallowed.split(",") if t]
+            tools += [t for t in ("WebSearch", "WebFetch") if t not in tools]
             self._resolved_flags["disallowed_tools"] = ",".join(tools)
 
         cli_flags = self.build_cli_flags()

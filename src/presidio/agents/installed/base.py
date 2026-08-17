@@ -156,6 +156,7 @@ class BaseInstalledAgent(BaseAgent, ABC):
         try:
             network_mode = environment.effective_network_mode
         except AttributeError:
+            # Missing effective network policy suppresses provider web tools by design.
             return True
         return NetworkMode(network_mode) != NetworkMode.PUBLIC
 

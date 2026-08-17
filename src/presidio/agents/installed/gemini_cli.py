@@ -656,6 +656,9 @@ class GeminiCli(BaseInstalledAgent):
         model_alias: str | None = None
 
         if disable_web_tools:
+            # google_web_search grounding executes on Google's servers, so the
+            # sandbox network policy cannot intercept it; exclude web tools
+            # whenever the effective network mode is not public.
             config["tools"] = {"exclude": ["google_web_search", "web_fetch"]}
 
         if self.mcp_servers:
