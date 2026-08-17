@@ -140,3 +140,20 @@ def test_cursor_network_policy_uses_effective_mode_and_separate_permission(
             is expected_config
         )
         assert f"cursor-agent {permission}" in commands[-1]
+
+
+def test_codex_config_errors_are_clear_and_features_table_is_replaced():
+    from presidio.errors import AgentConfigurationError
+
+    try:
+        Codex._disable_web_search_config_toml("not = [valid")
+    except AgentConfigurationError as exc:
+        assert "Codex config TOML is unparseable" in str(exc)
+        assert "web-search suppression cannot be applied" in str(exc)
+    else:
+        raise AssertionError("expected AgentConfigurationError")
+
+    parsed = toml.loads(
+        Codex._disable_web_search_config_toml('features = "not-a-table"')
+    )
+    assert parsed["features"]["web_search_request"] is False
