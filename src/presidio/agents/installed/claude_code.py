@@ -111,18 +111,16 @@ class ClaudeCode(BaseInstalledAgent):
     def name() -> str:
         return AgentName.CLAUDE_CODE.value
 
-    @staticmethod
-    def _should_disable_web_tools(environment: BaseEnvironment) -> bool:
-        return not environment.task_env_config.allow_internet
-
     def __init__(
         self,
         logs_dir: Path,
         memory_dir: str | None = None,
+        disable_web_tools: bool = False,
         *args,
         **kwargs,
     ):
         self.memory_dir = memory_dir
+        self._disable_web_tools = disable_web_tools
         super().__init__(logs_dir, *args, **kwargs)
 
     def get_version_command(self) -> str | None:
@@ -1328,10 +1326,10 @@ class ClaudeCode(BaseInstalledAgent):
         if mcp_command:
             setup_command += f" && {mcp_command}"
 
-        if self._should_disable_web_tools(environment):
+        if self._should_disable_web_tools(environment, self._disable_web_tools):
             # WebSearch executes on Anthropic's servers, so the sandbox network
-            # policy cannot intercept it; disallow web tools whenever the task
-            # does not allow internet access.
+            # policy cannot intercept it; disallow web tools whenever the
+            # effective network mode is not public.
             disallowed = str(self._resolved_flags.get("disallowed_tools") or "")
             tools = [t for t in disallowed.split(",") if t]
             tools += [t for t in ("WebSearch", "WebFetch") if t not in tools]

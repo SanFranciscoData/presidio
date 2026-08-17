@@ -69,9 +69,11 @@ class GeminiCli(BaseInstalledAgent):
         self,
         *args,
         reasoning_effort: _ReasoningEffort | None = None,
+        disable_web_tools: bool = False,
         **kwargs,
     ):
         self._reasoning_effort = reasoning_effort
+        self._disable_web_tools = disable_web_tools
         super().__init__(*args, **kwargs)
         self._validate_reasoning_effort(self._reasoning_effort, self.model_name)
 
@@ -646,10 +648,6 @@ class GeminiCli(BaseInstalledAgent):
             f"~/.gemini/skills/ 2>/dev/null || true"
         )
 
-    @staticmethod
-    def _should_disable_web_tools(environment: BaseEnvironment) -> bool:
-        return not environment.task_env_config.allow_internet
-
     def _build_settings_config(
         self, model: str | None = None, disable_web_tools: bool = False
     ) -> tuple[dict[str, Any] | None, str | None]:
@@ -660,7 +658,7 @@ class GeminiCli(BaseInstalledAgent):
         if disable_web_tools:
             # google_web_search grounding executes on Google's servers, so the
             # sandbox network policy cannot intercept it; exclude web tools
-            # whenever the task does not allow internet access.
+            # whenever the effective network mode is not public.
             config["tools"] = {"exclude": ["google_web_search", "web_fetch"]}
 
         if self.mcp_servers:
@@ -750,7 +748,10 @@ class GeminiCli(BaseInstalledAgent):
             await self.exec_as_agent(environment, command=skills_command, env=env)
 
         settings_command, model_alias = self._build_settings_command(
-            model, disable_web_tools=self._should_disable_web_tools(environment)
+            model,
+            disable_web_tools=self._should_disable_web_tools(
+                environment, self._disable_web_tools
+            ),
         )
         if settings_command:
             await self.exec_as_agent(environment, command=settings_command, env=env)

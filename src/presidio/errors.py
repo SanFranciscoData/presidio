@@ -51,6 +51,10 @@ class MissingCredentialError(ValueError):
     pass
 
 
+class AgentConfigurationError(ValueError):
+    pass
+
+
 class EgressMisconfigError(ValueError):
     pass
 
@@ -140,8 +144,12 @@ def classify(exc: BaseException) -> ErrorClass:
         ),
         (
             ErrorClass.CONFIG_FATAL,
-            (InvalidModelError, MissingCredentialError),
-            {"InvalidModelError", "MissingCredentialError"},
+            (InvalidModelError, MissingCredentialError, AgentConfigurationError),
+            {
+                "InvalidModelError",
+                "MissingCredentialError",
+                "AgentConfigurationError",
+            },
         ),
         (
             ErrorClass.EGRESS_MISCONFIG,

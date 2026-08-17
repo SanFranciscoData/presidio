@@ -11,6 +11,7 @@ from presidio.agents.installed.base import (
     with_prompt_template,
 )
 from presidio.agents.network import allowlist_from_urls, collect_url_values
+from presidio.errors import AgentConfigurationError
 from presidio.environments.base import BaseEnvironment
 from presidio.models.agent.context import AgentContext
 from presidio.models.agent.install import AgentInstallSpec, InstallStep
@@ -70,9 +71,11 @@ class Codex(BaseInstalledAgent):
         command_model_name: str | None = None,
         config_toml: str | None = None,
         config_toml_file: str | None = None,
+        disable_web_tools: bool = False,
         **kwargs,
     ):
         self._command_model_name = command_model_name
+        self._disable_web_tools = disable_web_tools
         self._config_toml = config_toml
         if config_toml_file:
             self._config_toml = Path(config_toml_file).read_text()
@@ -83,10 +86,6 @@ class Codex(BaseInstalledAgent):
         return AgentName.CODEX.value
 
     @staticmethod
-    def _should_disable_web_tools(environment: BaseEnvironment) -> bool:
-        return not environment.task_env_config.allow_internet
-
-    @staticmethod
     def _disable_web_search_config_toml(config_toml_text: str | None) -> str:
         """Merge a web-search disable into user config TOML.
 
@@ -95,12 +94,22 @@ class Codex(BaseInstalledAgent):
         takes precedence over the legacy ``[features]`` flags (and booleans
         under ``[tools]`` are ignored by codex, whose default mode is
         "cached", i.e. enabled); set both so old and new codex versions are
-        covered. Merging into the user config means the override always wins
-        and cannot corrupt the file.
+        covered. The effective network policy requires this override to be
+        merged into the user config so it always wins without discarding the
+        rest of the configuration.
         """
-        merged = toml.loads(config_toml_text) if config_toml_text else {}
+        try:
+            merged = toml.loads(config_toml_text) if config_toml_text else {}
+        except toml.TomlDecodeError as exc:
+            raise AgentConfigurationError(
+                "Codex config TOML is unparseable; web-search suppression "
+                "cannot be applied to it."
+            ) from exc
         merged["web_search"] = "disabled"
-        features = merged.setdefault("features", {})
+        features = merged.get("features")
+        if not isinstance(features, dict):
+            features = {}
+            merged["features"] = features
         features["web_search_request"] = False
         features["web_search_cached"] = False
         return toml.dumps(merged)
@@ -345,7 +354,9 @@ class Codex(BaseInstalledAgent):
         peak_context_tokens: int | None = None
         window_peak: int | None = None
         token_drop_summarization_count = 0
-        compacted_item_count = sum(1 for event in raw_events if event.get("type") == "compacted")
+        compacted_item_count = sum(
+            1 for event in raw_events if event.get("type") == "compacted"
+        )
         context_compacted_event_count = 0
         saw_usage = False
 
@@ -1147,7 +1158,7 @@ class Codex(BaseInstalledAgent):
                 "TOML"
             )
         config_toml_text = self._config_toml
-        if self._should_disable_web_tools(environment):
+        if self._should_disable_web_tools(environment, self._disable_web_tools):
             config_toml_text = self._disable_web_search_config_toml(config_toml_text)
         if config_toml_text:
             escaped_toml = shlex.quote(config_toml_text)

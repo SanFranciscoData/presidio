@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
 from presidio.agents.base import BaseAgent
 from presidio.environments.base import BaseEnvironment
+from presidio.models.task.config import NetworkMode
 from presidio.models.agent.install import AgentInstallSpec
 from presidio.utils.env import parse_bool_env_value
 from presidio.utils.templating import render_prompt_template
@@ -145,6 +146,19 @@ class BaseInstalledAgent(BaseAgent, ABC):
 
     CLI_FLAGS: ClassVar[list[CliFlag]] = []
     ENV_VARS: ClassVar[list[EnvVar]] = []
+
+    @staticmethod
+    def _should_disable_web_tools(
+        environment: BaseEnvironment, disable_web_tools: bool = False
+    ) -> bool:
+        if disable_web_tools:
+            return True
+        try:
+            network_mode = environment.effective_network_mode
+        except AttributeError:
+            # Missing effective network policy suppresses provider web tools by design.
+            return True
+        return NetworkMode(network_mode) != NetworkMode.PUBLIC
 
     def __init__(
         self,
