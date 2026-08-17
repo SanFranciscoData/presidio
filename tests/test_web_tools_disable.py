@@ -27,7 +27,7 @@ def _env(
 def test_should_disable_web_tools_follows_task_network_policy():
     for agent in (Codex, ClaudeCode, GeminiCli):
         assert agent._should_disable_web_tools(
-            _env(allow_internet=True, network_mode="allowlist")
+            _env(allow_internet=False, network_mode="allowlist")
         )
         assert (
             agent._should_disable_web_tools(
@@ -101,6 +101,7 @@ def test_cursor_network_policy_uses_effective_mode_and_separate_permission(
 
     cases = [
         (True, "allowlist", "allowlist", False, True, "--force"),
+        (False, "allowlist", "allowlist", False, True, "--trust"),
         (False, None, "no-network", False, True, "--trust"),
         (True, "public", "public", False, False, "--force"),
         (True, "public", "no-network", False, True, "--force"),

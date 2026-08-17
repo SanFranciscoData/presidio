@@ -153,16 +153,7 @@ class BaseInstalledAgent(BaseAgent, ABC):
     ) -> bool:
         if disable_web_tools:
             return True
-        try:
-            network_mode = environment.effective_network_mode
-        except AttributeError:
-            network_mode = getattr(
-                getattr(environment, "task_env_config", None),
-                "network_mode",
-                None,
-            )
-            if network_mode is None:
-                return not environment.task_env_config.allow_internet
+        network_mode = environment.effective_network_mode
         return NetworkMode(network_mode) != NetworkMode.PUBLIC
 
     def __init__(
