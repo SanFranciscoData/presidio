@@ -11,6 +11,7 @@ from presidio.agents.installed.base import (
     with_prompt_template,
 )
 from presidio.agents.network import allowlist_from_urls, collect_url_values
+from presidio.errors import AgentConfigurationError
 from presidio.environments.base import BaseEnvironment
 from presidio.models.agent.context import AgentContext
 from presidio.models.agent.install import AgentInstallSpec, InstallStep
@@ -85,22 +86,20 @@ class Codex(BaseInstalledAgent):
         return AgentName.CODEX.value
 
     @staticmethod
-    def _should_disable_web_tools(
-        environment: BaseEnvironment, disable_web_tools: bool = False
-    ) -> bool:
-        if disable_web_tools:
-            return True
-        network_mode = getattr(environment.task_env_config, "network_mode", None)
-        if network_mode is not None:
-            return getattr(network_mode, "value", network_mode) != "public"
-        return not environment.task_env_config.allow_internet
-
-    @staticmethod
     def _disable_web_search_config_toml(config_toml_text: str | None) -> str:
         """Merge a web-search disable into user config TOML."""
-        merged = toml.loads(config_toml_text) if config_toml_text else {}
+        try:
+            merged = toml.loads(config_toml_text) if config_toml_text else {}
+        except toml.TomlDecodeError as exc:
+            raise AgentConfigurationError(
+                "Codex config TOML is unparseable; web-search suppression "
+                "cannot be applied to it."
+            ) from exc
         merged["web_search"] = "disabled"
-        features = merged.setdefault("features", {})
+        features = merged.get("features")
+        if not isinstance(features, dict):
+            features = {}
+            merged["features"] = features
         features["web_search_request"] = False
         features["web_search_cached"] = False
         return toml.dumps(merged)

@@ -4,14 +4,23 @@ import toml
 
 from presidio.agents.installed.claude_code import ClaudeCode
 from presidio.agents.installed.codex import Codex
+from presidio.agents.installed.cursor_cli import CursorCli
 from presidio.agents.installed.gemini_cli import GeminiCli
 
 
-def _env(allow_internet: bool, network_mode: str | None = None) -> SimpleNamespace:
+def _env(
+    allow_internet: bool,
+    network_mode: str | None = None,
+    effective_mode: str | None = None,
+) -> SimpleNamespace:
+    resolved_mode = effective_mode or network_mode
+    if resolved_mode is None:
+        resolved_mode = "public" if allow_internet else "no-network"
     return SimpleNamespace(
         task_env_config=SimpleNamespace(
             allow_internet=allow_internet, network_mode=network_mode
-        )
+        ),
+        effective_network_mode=resolved_mode,
     )
 
 
@@ -83,3 +92,50 @@ def test_gemini_settings_unchanged_when_internet_allowed(tmp_path):
     config, _ = agent._build_settings_config(disable_web_tools=False)
 
     assert config is None or "tools" not in config
+
+
+def test_cursor_network_policy_uses_effective_mode_and_separate_permission(
+    tmp_path, monkeypatch
+):
+    import asyncio
+
+    cases = [
+        (True, "allowlist", "allowlist", False, True, "--force"),
+        (False, None, "no-network", False, True, "--trust"),
+        (True, "public", "public", False, False, "--force"),
+        (True, "public", "no-network", False, True, "--force"),
+        (True, "public", "public", True, True, "--force"),
+    ]
+    for (
+        allow_internet,
+        network_mode,
+        effective_mode,
+        explicit,
+        expected_config,
+        permission,
+    ) in cases:
+        agent = CursorCli(
+            logs_dir=tmp_path,
+            model_name="cursor/composer-2.5",
+            disable_web_tools=explicit,
+        )
+        commands = []
+        monkeypatch.setattr(
+            agent,
+            "build_process_env",
+            lambda _: {"CURSOR_API_KEY": "configured"},
+        )
+
+        async def capture_exec(*args, command, **kwargs):
+            commands.append(command)
+
+        monkeypatch.setattr(agent, "exec_as_agent", capture_exec)
+        environment = _env(allow_internet, network_mode, effective_mode)
+
+        asyncio.run(agent.run("Fix the tests", environment, SimpleNamespace()))
+
+        assert (
+            any("webFetchDomainAllowlist" in command for command in commands)
+            is expected_config
+        )
+        assert f"cursor-agent {permission}" in commands[-1]

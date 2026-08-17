@@ -648,17 +648,6 @@ class GeminiCli(BaseInstalledAgent):
             f"~/.gemini/skills/ 2>/dev/null || true"
         )
 
-    @staticmethod
-    def _should_disable_web_tools(
-        environment: BaseEnvironment, disable_web_tools: bool = False
-    ) -> bool:
-        if disable_web_tools:
-            return True
-        network_mode = getattr(environment.task_env_config, "network_mode", None)
-        if network_mode is not None:
-            return getattr(network_mode, "value", network_mode) != "public"
-        return not environment.task_env_config.allow_internet
-
     def _build_settings_config(
         self, model: str | None = None, disable_web_tools: bool = False
     ) -> tuple[dict[str, Any] | None, str | None]:

@@ -607,6 +607,13 @@ class BaseEnvironment(ABC):
         """
         return self._network_mode, sorted(self.network_allowlist.domains)
 
+    @property
+    def effective_network_mode(self) -> NetworkMode:
+        """Return the network mode currently applied to this environment."""
+        if self._active_network_policy is not None:
+            return self._active_network_policy[0]
+        return self.baseline_network_policy()[0]
+
     async def enter_phase_network_policy(
         self, network_mode: NetworkMode, allowed_hosts: list[str]
     ) -> None:

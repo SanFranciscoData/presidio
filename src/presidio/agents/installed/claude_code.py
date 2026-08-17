@@ -111,17 +111,6 @@ class ClaudeCode(BaseInstalledAgent):
     def name() -> str:
         return AgentName.CLAUDE_CODE.value
 
-    @staticmethod
-    def _should_disable_web_tools(
-        environment: BaseEnvironment, disable_web_tools: bool = False
-    ) -> bool:
-        if disable_web_tools:
-            return True
-        network_mode = getattr(environment.task_env_config, "network_mode", None)
-        if network_mode is not None:
-            return getattr(network_mode, "value", network_mode) != "public"
-        return not environment.task_env_config.allow_internet
-
     def __init__(
         self,
         logs_dir: Path,
