@@ -153,7 +153,10 @@ class BaseInstalledAgent(BaseAgent, ABC):
     ) -> bool:
         if disable_web_tools:
             return True
-        network_mode = environment.effective_network_mode
+        try:
+            network_mode = environment.effective_network_mode
+        except AttributeError:
+            return True
         return NetworkMode(network_mode) != NetworkMode.PUBLIC
 
     def __init__(
