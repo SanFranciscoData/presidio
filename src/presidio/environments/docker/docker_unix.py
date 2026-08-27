@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import shlex
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -55,6 +57,46 @@ class UnixOps:
         await self._env._run_docker_compose_command(
             ["cp", f"main:{source_dir}/.", str(target_dir)],
             check=True,
+        )
+
+    async def download_file_from_service(
+        self,
+        service: str,
+        source_path: str,
+        target_path: Path | str,
+    ) -> None:
+        await self._chown_in_service(service, source_path)
+        await self._env._run_docker_compose_command(
+            ["cp", f"{service}:{source_path}", str(target_path)],
+            check=True,
+        )
+
+    async def download_dir_from_service(
+        self,
+        service: str,
+        source_dir: str,
+        target_dir: Path | str,
+    ) -> None:
+        await self._chown_in_service(service, source_dir, recursive=True)
+        await self._env._run_docker_compose_command(
+            ["cp", f"{service}:{source_dir}/.", str(target_dir)],
+            check=True,
+        )
+
+    async def _chown_in_service(
+        self,
+        service: str,
+        path: str,
+        recursive: bool = False,
+    ) -> None:
+        """Best-effort chown of a service container path to the host user."""
+        if not hasattr(os, "getuid"):
+            return
+        flag = "-R " if recursive else ""
+        await self._env._exec_in_compose_service(
+            service,
+            f"chown {flag}{os.getuid()}:{os.getgid()} {shlex.quote(path)}",
+            user="root",
         )
 
     @staticmethod

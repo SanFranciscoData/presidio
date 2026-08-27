@@ -730,8 +730,58 @@ class DockerEnvironment(BaseEnvironment):
     async def download_dir(self, source_dir: str, target_dir: Path | str):
         await self._platform.download_dir(source_dir, target_dir)
 
+    async def download_file_from_service(
+        self,
+        service: str,
+        source_path: str,
+        target_path: Path | str,
+    ) -> None:
+        if service == "main":
+            await self.download_file(source_path, target_path)
+            return
+        await self._platform.download_file_from_service(
+            service, source_path, target_path
+        )
+
+    async def download_dir_from_service(
+        self,
+        service: str,
+        source_dir: str,
+        target_dir: Path | str,
+    ) -> None:
+        if service == "main":
+            await self.download_dir(source_dir, target_dir)
+            return
+        await self._platform.download_dir_from_service(service, source_dir, target_dir)
+
     async def exec(
         self,
+        command: str,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_sec: int | None = None,
+        user: str | int | None = None,
+    ) -> ExecResult:
+        return await self._exec_in_compose_service(
+            "main", command, cwd=cwd, env=env, timeout_sec=timeout_sec, user=user
+        )
+
+    async def exec_in_service(
+        self,
+        service: str,
+        command: str,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_sec: int | None = None,
+        user: str | int | None = None,
+    ) -> ExecResult:
+        return await self._exec_in_compose_service(
+            service, command, cwd=cwd, env=env, timeout_sec=timeout_sec, user=user
+        )
+
+    async def _exec_in_compose_service(
+        self,
+        service: str,
         command: str,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
@@ -743,7 +793,11 @@ class DockerEnvironment(BaseEnvironment):
 
         exec_command = ["exec"]
 
-        effective_cwd = cwd or self.task_env_config.workdir
+        # The configured workdir belongs to the main service's image; an
+        # auxiliary service keeps its own image default unless cwd is given.
+        effective_cwd = cwd or (
+            self.task_env_config.workdir if service == "main" else None
+        )
         if effective_cwd:
             exec_command.extend(["-w", effective_cwd])
 
@@ -754,7 +808,7 @@ class DockerEnvironment(BaseEnvironment):
         if user is not None:
             exec_command.extend(["-u", str(user)])
 
-        exec_command.append("main")
+        exec_command.append(service)
         exec_command.extend(self._platform.exec_shell_args(command))
 
         return await self._run_docker_compose_command(

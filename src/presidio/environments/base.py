@@ -24,6 +24,7 @@ from presidio.environments.resource_policies import (
 from presidio.models.agent.install import AgentInstallSpec
 from presidio.models.agent.network import NetworkAllowlist
 from presidio.models.task.config import (
+    MAIN_SERVICE_NAME,
     EnvironmentConfig,
     HealthcheckConfig,
     NetworkMode,
@@ -42,6 +43,26 @@ _ENV_TRANSFER_TAR_DIR = PurePosixPath("/tmp")
 
 class HealthcheckError(RuntimeError):
     pass
+
+
+class ServiceExecUnsupportedError(RuntimeError):
+    """The environment cannot execute commands in the named auxiliary service."""
+
+    def __init__(self, service: str) -> None:
+        super().__init__(
+            f"This environment cannot execute commands in service {service!r}"
+        )
+        self.service = service
+
+
+class ServiceTransferUnsupportedError(RuntimeError):
+    """The environment cannot transfer files to/from the named auxiliary service."""
+
+    def __init__(self, service: str) -> None:
+        super().__init__(
+            f"This environment cannot transfer files for service {service!r}"
+        )
+        self.service = service
 
 
 class ExecResult(BaseModel):
@@ -694,6 +715,40 @@ class BaseEnvironment(ABC):
             target_dir: The local path to which to copy the directory.
         """
 
+    async def download_file_from_service(
+        self,
+        service: str,
+        source_path: str,
+        target_path: Path | str,
+    ) -> None:
+        """Download a file from a named compose service.
+
+        The main service delegates to ``download_file``; environments without
+        auxiliary-service transfer raise ``ServiceTransferUnsupportedError``
+        so callers can degrade explicitly.
+        """
+        if service == MAIN_SERVICE_NAME:
+            await self.download_file(source_path=source_path, target_path=target_path)
+            return
+        raise ServiceTransferUnsupportedError(service)
+
+    async def download_dir_from_service(
+        self,
+        service: str,
+        source_dir: str,
+        target_dir: Path | str,
+    ) -> None:
+        """Download a directory from a named compose service.
+
+        The main service delegates to ``download_dir``; environments without
+        auxiliary-service transfer raise ``ServiceTransferUnsupportedError``
+        so callers can degrade explicitly.
+        """
+        if service == MAIN_SERVICE_NAME:
+            await self.download_dir(source_dir=source_dir, target_dir=target_dir)
+            return
+        raise ServiceTransferUnsupportedError(service)
+
     async def download_dir_with_exclusions(
         self,
         *,
@@ -767,6 +822,23 @@ class BaseEnvironment(ABC):
                 ``self.default_user``; if that is also None the environment's
                 container default (typically root) is used.
         """
+
+    async def exec_in_service(
+        self,
+        service: str,
+        command: str,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_sec: int | None = None,
+        user: str | int | None = None,
+    ) -> ExecResult:
+        """Execute a command in a named auxiliary (non-main) service.
+
+        Environments composed of multiple services (e.g. docker compose
+        sidecars) override this; single-container environments raise
+        ``ServiceExecUnsupportedError`` so callers can degrade explicitly.
+        """
+        raise ServiceExecUnsupportedError(service)
 
     async def is_dir(self, path: str, user: str | int | None = None) -> bool:
         """Check if a remote path is a directory.

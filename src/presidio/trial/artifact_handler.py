@@ -1,10 +1,16 @@
 import json
 import logging
+import shlex
 import shutil
 from collections.abc import Sequence
 from pathlib import Path, PurePath, PurePosixPath
 
-from presidio.environments.base import BaseEnvironment, EnvironmentPath
+from presidio.environments.base import (
+    BaseEnvironment,
+    EnvironmentPath,
+    ServiceTransferUnsupportedError,
+)
+from presidio.models.task.config import MAIN_SERVICE_NAME
 from presidio.models.trial.artifact_manifest import (
     ArtifactManifest,
     ArtifactManifestEntry,
@@ -170,8 +176,17 @@ class ArtifactHandler:
                 manifest_destination=manifest_destination,
             )
 
+        service = artifact.service
         try:
-            is_dir = await source_env.is_dir(source, user="root")
+            if service == MAIN_SERVICE_NAME:
+                is_dir = await source_env.is_dir(source, user="root")
+            else:
+                probe = await source_env.exec_in_service(
+                    service,
+                    f"test -d {shlex.quote(source)}",
+                    user="root",
+                )
+                is_dir = probe.return_code == 0
         except Exception:
             is_dir = not Path(source).suffix
 
@@ -179,23 +194,38 @@ class ArtifactHandler:
             if is_dir:
                 target.mkdir(parents=True, exist_ok=True)
                 if artifact.exclude:
+                    if service != MAIN_SERVICE_NAME:
+                        raise ServiceTransferUnsupportedError(service)
                     await source_env.download_dir_with_exclusions(
                         source_dir=source,
                         target_dir=target,
                         exclude=artifact.exclude,
                     )
-                else:
+                elif service == MAIN_SERVICE_NAME:
                     await source_env.download_dir(
+                        source_dir=source,
+                        target_dir=target,
+                    )
+                else:
+                    await source_env.download_dir_from_service(
+                        service,
                         source_dir=source,
                         target_dir=target,
                     )
                 artifact_type = "directory"
             else:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                await source_env.download_file(
-                    source_path=source,
-                    target_path=target,
-                )
+                if service == MAIN_SERVICE_NAME:
+                    await source_env.download_file(
+                        source_path=source,
+                        target_path=target,
+                    )
+                else:
+                    await source_env.download_file_from_service(
+                        service,
+                        source_path=source,
+                        target_path=target,
+                    )
                 artifact_type = "file"
 
             return ArtifactManifestEntry(

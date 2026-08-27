@@ -15,6 +15,8 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from presidio.environments.base import ServiceTransferUnsupportedError
+
 if TYPE_CHECKING:
     from presidio.environments.docker.docker import DockerEnvironment
 
@@ -154,6 +156,22 @@ class WindowsOps:
     async def download_dir(self, source_dir: str, target_dir: Path | str) -> None:
         Path(target_dir).mkdir(parents=True, exist_ok=True)
         await self._tar_download(source_dir, target_dir)
+
+    async def download_file_from_service(
+        self,
+        service: str,
+        source_path: str,
+        target_path: Path | str,
+    ) -> None:
+        raise ServiceTransferUnsupportedError(service)
+
+    async def download_dir_from_service(
+        self,
+        service: str,
+        source_dir: str,
+        target_dir: Path | str,
+    ) -> None:
+        raise ServiceTransferUnsupportedError(service)
 
     # ------------------------------------------------------------------
     # Exec

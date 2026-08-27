@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from presidio.environments.base import ServiceExecUnsupportedError
 from presidio.models.task.config import (
     StepConfig,
     TaskConfig,
@@ -37,6 +38,9 @@ def _fake_trial(hooks: list[VerifierCollectConfig]) -> SimpleNamespace:
     environment = AsyncMock()
     environment.default_user = None
     environment.exec.return_value = SimpleNamespace(return_code=0, stdout="", stderr="")
+    environment.exec_in_service.return_value = SimpleNamespace(
+        return_code=0, stdout="", stderr=""
+    )
     config = SimpleNamespace(verifier=SimpleNamespace(collect=hooks))
     trial = SimpleNamespace(
         _task=SimpleNamespace(config=config),
@@ -104,10 +108,30 @@ async def test_step_hooks_run_after_task_hooks() -> None:
 
 
 @run_async
-async def test_sidecar_hook_is_skipped() -> None:
-    hook = VerifierCollectConfig(command="echo hi", service="db")
+async def test_sidecar_hook_runs_in_declared_service() -> None:
+    """A hook declaring an auxiliary service (e.g. a kafka sidecar) executes
+    in THAT service, not in main — this is the published-task class where a
+    kafka snapshot artifact must be captured from the sidecar."""
+    hook = VerifierCollectConfig(command="tar czf /tmp/snap.tgz /data", service="kafka")
     trial = _fake_trial([hook])
     await Trial._run_collect_hooks(trial)
+    trial._environment.exec.assert_not_awaited()
+    trial._environment.exec_in_service.assert_awaited_once_with(
+        service="kafka",
+        command="tar czf /tmp/snap.tgz /data",
+        timeout_sec=60,
+        user=None,
+    )
+
+
+@run_async
+async def test_sidecar_hook_skipped_when_environment_cannot() -> None:
+    """Environments without auxiliary-service execution degrade to the old
+    explicit skip-with-warning behavior instead of crashing the trial."""
+    hook = VerifierCollectConfig(command="echo hi", service="db")
+    trial = _fake_trial([hook])
+    trial._environment.exec_in_service.side_effect = ServiceExecUnsupportedError("db")
+    await Trial._run_collect_hooks(trial)  # must not raise
     trial._environment.exec.assert_not_awaited()
 
 

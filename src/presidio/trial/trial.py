@@ -19,7 +19,11 @@ from tenacity import (
 )
 
 from presidio.agents.installed.base import BaseInstalledAgent, NonZeroAgentExitCodeError
-from presidio.environments.base import BaseEnvironment, HealthcheckError
+from presidio.environments.base import (
+    BaseEnvironment,
+    HealthcheckError,
+    ServiceExecUnsupportedError,
+)
 from presidio.environments.factory import EnvironmentFactory
 from presidio.models.agent.context import AgentContext
 from presidio.models.task.config import (
@@ -1021,8 +1025,9 @@ class Trial:
         (e.g. capture the change set as ``/logs/artifacts/model.patch`` for a
         separate verifier). Failures are logged, not fatal: a missing or failed
         capture simply yields no artifact, which downstream grading treats as
-        an empty submission. Hooks targeting a compose service other than main
-        are skipped: Presidio does not run commands in sidecar services.
+        an empty submission. Hooks declaring a compose service other than main
+        run in that service via ``exec_in_service``; environments without
+        auxiliary-service execution skip such hooks with a warning.
         """
         hooks = list(self._task.config.verifier.collect)
         if step_cfg is not None:
@@ -1041,21 +1046,23 @@ class Trial:
 
     async def _exec_collect_hooks(self, hooks: list[VerifierCollectConfig]) -> None:
         for hook in hooks:
-            if hook.service != MAIN_SERVICE_NAME:
-                self._logger.warning(
-                    f"Skipping collect hook targeting unsupported service "
-                    f"'{hook.service}': {hook.command!r}"
-                )
-                continue
             self._logger.debug(
                 f"Running collect hook in service '{hook.service}': {hook.command!r}"
             )
             try:
-                result = await self._environment.exec(
-                    command=hook.command,
-                    timeout_sec=max(1, math.ceil(hook.timeout_sec)),
-                    user=hook.user,
-                )
+                if hook.service == MAIN_SERVICE_NAME:
+                    result = await self._environment.exec(
+                        command=hook.command,
+                        timeout_sec=max(1, math.ceil(hook.timeout_sec)),
+                        user=hook.user,
+                    )
+                else:
+                    result = await self._environment.exec_in_service(
+                        service=hook.service,
+                        command=hook.command,
+                        timeout_sec=max(1, math.ceil(hook.timeout_sec)),
+                        user=hook.user,
+                    )
                 if result.return_code != 0:
                     self._logger.warning(
                         f"Collect hook in service '{hook.service}' exited with "
@@ -1066,6 +1073,12 @@ class Trial:
                     self._logger.debug(
                         f"Collect hook in service '{hook.service}' completed"
                     )
+            except ServiceExecUnsupportedError:
+                self._logger.warning(
+                    f"Skipping collect hook targeting service "
+                    f"'{hook.service}': this environment cannot execute "
+                    f"commands in auxiliary services ({hook.command!r})"
+                )
             except Exception as exc:
                 self._logger.warning(
                     f"Collect hook in service '{hook.service}' failed "
