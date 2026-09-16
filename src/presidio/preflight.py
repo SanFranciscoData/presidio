@@ -25,6 +25,9 @@ from presidio.models.trial.config import EnvironmentConfig
 from presidio.models.trial.paths import TrialPaths
 
 
+_PREFLIGHT_MAX_TOKENS = 16
+
+
 @dataclass(frozen=True)
 class ModelCheckResult:
     model: str
@@ -50,7 +53,7 @@ def check_model(
         completion(
             model=model,
             messages=[{"role": "user", "content": "Reply with one token."}],
-            max_tokens=1,
+            max_tokens=_PREFLIGHT_MAX_TOKENS,
         )
     except Exception as exc:
         mapped = _model_error(exc, model)

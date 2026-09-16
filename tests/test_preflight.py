@@ -17,7 +17,7 @@ from presidio.models.trial.config import EnvironmentConfig
 from presidio.preflight import check_model, probe_egress, run_model_preflight
 
 
-def test_model_check_passes_with_one_token_completion():
+def test_model_check_uses_provider_compatible_token_budget():
     calls = []
 
     def completion(**kwargs):
@@ -30,7 +30,7 @@ def test_model_check_passes_with_one_token_completion():
         {
             "model": "openai/test",
             "messages": [{"role": "user", "content": "Reply with one token."}],
-            "max_tokens": 1,
+            "max_tokens": 16,
         }
     ]
 
