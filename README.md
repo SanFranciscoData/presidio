@@ -30,6 +30,33 @@ presidio run -p path/to/dataset --n-tasks 10 --sample-seed 0
 
 Results are written under `jobs/<name>/<trial_id>/`.
 
+### Antigravity CLI (opt-in)
+
+Select Google's native [Antigravity CLI](https://antigravity.google/product/antigravity-cli/)
+explicitly; existing Gemini model routing and `gemini-cli` configurations are unchanged:
+
+```bash
+presidio run -p path/to/task -a antigravity-cli \
+  -m gemini/gemini-3.8-flash --env-file .env
+```
+
+The equivalent job configuration is:
+
+```json
+{"agents": [{"name": "antigravity-cli", "model_name": "gemini/gemini-3.8-flash"}]}
+```
+
+Set `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) for headless authentication.
+`GOOGLE_GEMINI_BASE_URL` can select a Gemini-compatible endpoint. The native
+`agy` binary is installed using Google's official latest-release installer;
+version pinning, interactive OAuth, ADC, and native session resume are not supported
+by this integration. Use `--ak reasoning_effort=high` to pass an explicit effort
+(`low`, `medium`, `high`, `xhigh`, or `max`, subject to model support).
+Task-provided skills and MCP servers are configured in Antigravity's native paths.
+Separate streaming JSON and stderr logs are retained; ATIF trajectories include
+tool calls, responses, and cache-inclusive token counts. Costs use LiteLLM pricing
+when available and remain unset for unknown models.
+
 Run `presidio run --help` for the full flag list and the available agents and environments. Other commands: `presidio job`, `presidio critique`, `presidio check`, `presidio analyze`.
 
 ## Tasks
