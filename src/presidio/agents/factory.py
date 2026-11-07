@@ -2,6 +2,7 @@ import importlib
 from pathlib import Path
 
 from presidio.agents.base import BaseAgent
+from presidio.agents.installed.antigravity_cli import AntigravityCli
 from presidio.agents.installed.claude_code import ClaudeCode
 from presidio.agents.installed.codex import Codex
 from presidio.agents.installed.cursor_cli import CursorCli
@@ -24,6 +25,7 @@ class AgentFactory:
         Codex,
         CursorCli,
         GeminiCli,
+        AntigravityCli,
         MiniSweAgent,
         OpenCode,
         TerminusAgent,

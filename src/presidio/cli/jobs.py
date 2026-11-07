@@ -346,7 +346,7 @@ def start(
         Option(
             "-a",
             "--agent",
-            help=f"Agent name (default: {AgentName.ORACLE.value})",
+            help="Agent name (default: antigravity-cli for Gemini models, oracle otherwise)",
             rich_help_panel="Agent",
             show_default=False,
         ),
@@ -678,7 +678,11 @@ def start(
     if retry_exclude_exceptions is not None:
         config.retry.exclude_exceptions = set(retry_exclude_exceptions)
 
-    if agent_name is not None or agent_import_path is not None:
+    if (
+        agent_name is not None
+        or agent_import_path is not None
+        or (config_path is None and model_names is not None)
+    ):
         config.agents = []
         parsed_kwargs = parse_kwargs(agent_kwargs)
         parsed_env = parse_env_vars(agent_env)

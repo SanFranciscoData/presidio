@@ -68,7 +68,7 @@ class AgentConfig(BaseModel):
     @model_validator(mode="after")
     def set_default_name(self):
         if self.name is None and self.import_path is None:
-            self.name = AgentName.ORACLE.value
+            self.name = AgentName.default_for_model(self.model_name).value
         return self
 
 
