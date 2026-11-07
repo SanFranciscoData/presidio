@@ -93,7 +93,7 @@ def run_command(
         Option(
             "-a",
             "--agent",
-            help=f"Agent name (default: {AgentName.ORACLE.value})",
+            help="Agent name (default: antigravity-cli for Gemini models, oracle otherwise)",
             rich_help_panel="Agent",
             show_default=False,
         ),

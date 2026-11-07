@@ -30,21 +30,27 @@ presidio run -p path/to/dataset --n-tasks 10 --sample-seed 0
 
 Results are written under `jobs/<name>/<trial_id>/`.
 
-### Antigravity CLI (opt-in)
+### Gemini models (Antigravity CLI by default)
 
-Select Google's native [Antigravity CLI](https://antigravity.google/product/antigravity-cli/)
-explicitly; existing Gemini model routing and `gemini-cli` configurations are unchanged:
+Google's native [Antigravity CLI](https://antigravity.google/product/antigravity-cli/)
+is the default when a Gemini model is supplied without an agent:
 
 ```bash
-presidio run -p path/to/task -a antigravity-cli \
+presidio run -p path/to/task \
   -m gemini/gemini-3.8-flash --env-file .env
 ```
 
 The equivalent job configuration is:
 
 ```json
-{"agents": [{"name": "antigravity-cli", "model_name": "gemini/gemini-3.8-flash"}]}
+{"agents": [{"model_name": "gemini/gemini-3.8-flash"}]}
 ```
+
+This applies to `gemini/*`, `google/*`, and bare `gemini-*` model names.
+Explicit agent names and custom import paths are never replaced: use
+`-a gemini-cli` (or `"name": "gemini-cli"` in job config) for the legacy CLI.
+You can also explicitly select `-a antigravity-cli`. Other models and runs
+without a model retain the `oracle` fallback.
 
 Set `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) for headless authentication.
 `GOOGLE_GEMINI_BASE_URL` can select a Gemini-compatible endpoint. The native
